@@ -1,0 +1,6 @@
+# ArUco cube material
+newmtl cube_material
+Ka 1.0 1.0 1.0
+Kd 1.0 1.0 1.0
+Ks 0.0 0.0 0.0
+map_Kd cube_atlas.png

@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Generated output directories (cube.3mf, config.json, etc.)
+# models/
+# *_cube/
+# aruco_cube/
+
+# Exported formats
+# *.3mf
+# *.wrl
+# *.obj
+# *.mtl
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+
+# Claude Code
+.claude/
