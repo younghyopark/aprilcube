@@ -995,6 +995,73 @@ def parse_grid(s: str) -> tuple[int, int, int]:
         raise ValueError(f"Grid must be WxHxD or RxC, got: {s}")
 
 
+def write_readme(config: CubeConfig, config_data: dict,
+                 face_tag_map: dict, out_dir: str):
+    """Write a README.md summarizing the generated cube."""
+    bx, by, bz = config.box_dims
+    cs = config.cell_size
+    grid_str = f"{config.grid_x}x{config.grid_y}x{config.grid_z}"
+    margin_mm = config.margin_cells * cs
+    border_mm = config.border_cells * cs
+
+    face_lines = []
+    for name, ids in face_tag_map.items():
+        face_lines.append(f"| {name} | {', '.join(str(i) for i in ids)} |")
+
+    md = f"""# ArUco Cube — {grid_str}
+
+![Cube preview](thumbnail.png)
+
+## Parameters
+
+| Parameter | Value |
+|-----------|-------|
+| Dictionary | `{config.dict_name}` |
+| Grid | {grid_str} (X x Y x Z tags) |
+| Box dimensions | {bx:.4g} x {by:.4g} x {bz:.4g} mm |
+| Tag size | {config.tag_size_mm:.4g} mm ({config.marker_pixels}x{config.marker_pixels} cells) |
+| Cell size | {cs:.4g} mm |
+| Margin | {config.margin_cells} cell ({margin_mm:.4g} mm) |
+| Border | {config.border_cells} cell ({border_mm:.4g} mm) |
+| Total tags | {len(config.tag_ids)} |
+| Tag IDs | {config.tag_ids[0]}–{config.tag_ids[-1]} |
+
+## Face Layout
+
+| Face | Tag IDs |
+|------|---------|
+{chr(10).join(face_lines)}
+
+## Files
+
+| File | Description |
+|------|-------------|
+| `cube.3mf` | Multi-color 3MF for Bambu Studio |
+| `config.json` | Detector config (used by `detect_cube.py`) |
+| `thumbnail.png` | 6-view preview |
+| `mujoco/cube.xml` | MuJoCo MJCF model |
+| `mujoco/cube.obj` | Wavefront OBJ mesh (UV-mapped) |
+| `mujoco/cube.mtl` | OBJ material file |
+| `mujoco/cube_atlas.png` | Texture atlas |
+
+## Config JSON
+
+```json
+{json.dumps(config_data, indent=2)}
+```
+
+## Regenerate
+
+```bash
+python generate_cube.py --grid {grid_str} --dict {config.dict_name} --tag-size {config.tag_size_mm:.4g} --margin-cell {config.margin_cells} --border-cell {config.border_cells} -o {os.path.basename(out_dir)}
+```
+"""
+    readme_path = os.path.join(out_dir, "README.md")
+    with open(readme_path, "w") as f:
+        f.write(md)
+    print(f"Wrote {readme_path}")
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -1138,6 +1205,9 @@ def main():
     # Render thumbnail
     thumb_path = os.path.join(out_dir, "thumbnail.png")
     render_cube_thumbnail(config, face_grids, thumb_path)
+
+    # Write per-directory README.md
+    write_readme(config, config_data, face_tag_map, out_dir)
 
     print("Done!")
 
