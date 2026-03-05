@@ -43,11 +43,13 @@ Creates a `CubePoseEstimator` ready to process frames.
 
 | Arg | Type | Description |
 |-----|------|-------------|
-| `cube_cfg` | `str \| Path` | Path to `config.json` from `aprilcube generate` |
+| `cube_cfg` | `str \| Path` | Path to `config.json` or model directory |
 | `intrinsic_cfg` | `str \| Path \| dict \| np.ndarray` | Camera intrinsics (see below) |
+| `extrinsic` | `np.ndarray \| None` | 4x4 world-to-camera transform (default: `None`) |
 | `enable_filter` | `bool` | Enable Kalman temporal smoothing (default: `True`) |
 | `filter_config` | `KalmanFilterConfig \| None` | Custom filter tuning |
 | `dist_coeffs` | `np.ndarray \| None` | Override distortion coefficients |
+| `fast` | `bool` | Faster detection for real-time use (default: `False`) |
 
 **`intrinsic_cfg` formats:**
 
@@ -61,6 +63,50 @@ det = aprilcube.detector("config.json", {"fx": 800, "fy": 800, "cx": 320, "cy": 
 # 3x3 numpy camera matrix directly
 K = np.array([[800, 0, 320], [0, 800, 240], [0, 0, 1]], dtype=np.float64)
 det = aprilcube.detector("config.json", K)
+```
+
+### 3D Visualization (viser)
+
+The detector has built-in web-based 3D visualization via [viser](https://github.com/nerfstudio-project/viser). Call `build_viser()` to start a server — it automatically renders the latest `process_frame` result in a background thread.
+
+```bash
+pip install viser trimesh
+```
+
+```python
+import cv2
+import aprilcube
+
+det = aprilcube.detector(
+    "models/my_cube",  # directory or config.json path
+    {"fx": 800, "fy": 800, "cx": 320, "cy": 240},
+    fast=True,
+)
+
+# Start viser server (auto-renders in background)
+server = det.build_viser(port=8080)
+
+# Your capture loop — viser updates automatically
+cap = cv2.VideoCapture(0)
+while True:
+    ret, frame = cap.read()
+    if not ret:
+        break
+    det.process_frame(frame)
+```
+
+The scene includes world/camera/object coordinate frames, a ground grid, and the textured cube mesh (loaded from `mujoco/cube.obj` in the model directory). The returned `ViserServer` can be customized — add objects to `server.scene` before or after starting the loop.
+
+### World-frame poses
+
+Pass `extrinsic` (a 4x4 T_world_cam matrix) to get object poses in world frame:
+
+```python
+import numpy as np
+
+det = aprilcube.detector("my_cube", intrinsics, extrinsic=np.eye(4))
+result = det.process_frame(frame)
+T_world_obj = det.world_pose(result)  # 4x4 numpy array or None
 ```
 
 ### Direct class access
