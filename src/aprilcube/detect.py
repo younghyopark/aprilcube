@@ -8,6 +8,7 @@ detects markers in camera/image/video, and estimates the cube's 6-DOF pose.
 import argparse
 import json
 import sys
+import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -703,9 +704,20 @@ class CubePoseEstimator:
             (0, 4), (1, 5), (2, 6), (3, 7),  # verticals
         ]
 
+        # Latest detection state (read by viser background thread)
+        self._latest_result: dict | None = None
+        self._latest_frame: np.ndarray | None = None
+        self._latest_lock = threading.Lock()
+        self._frame_counter = 0
+        self._fps = 0.0
+        self._fps_t = time.time()
+        self._fps_n = 0
+
         # Viser state (populated by build_viser)
         self._viser_gui_image = None
         self._viser_gui_status = None
+        self._viser_server = None
+        self._viser_rendered_counter = -1
 
     def _try_predict(self, timestamp: float, result: dict) -> dict:
         """Try KF prediction as fallback when detection/PnP fails."""
@@ -725,6 +737,21 @@ class CubePoseEstimator:
         self.prev_tvec = None
         if self.pose_filter:
             self.pose_filter.reset()
+        return result
+
+    def _store_latest(self, result: dict, frame: np.ndarray) -> dict:
+        """Store the latest result/frame for the viser background thread."""
+        with self._latest_lock:
+            self._latest_result = result
+            self._latest_frame = frame
+            self._frame_counter += 1
+        # FPS tracking
+        self._fps_n += 1
+        elapsed = time.time() - self._fps_t
+        if elapsed >= 1.0:
+            self._fps = self._fps_n / elapsed
+            self._fps_n = 0
+            self._fps_t = time.time()
         return result
 
     def process_frame(self, image: np.ndarray,
@@ -750,7 +777,7 @@ class CubePoseEstimator:
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if len(image.shape) == 3 else image
         corners_list, ids, _ = self.detector.detectMarkers(gray)
         if ids is None:
-            return self._try_predict(timestamp, result)
+            return self._store_latest(self._try_predict(timestamp, result), image)
 
         # Filter to valid cube IDs
         detections = []
@@ -765,7 +792,7 @@ class CubePoseEstimator:
         result["tag_ids"] = [d[0] for d in detections]
 
         if not detections:
-            return self._try_predict(timestamp, result)
+            return self._store_latest(self._try_predict(timestamp, result), image)
 
         # Identify visible faces
         for tag_id, _ in detections:
@@ -795,7 +822,7 @@ class CubePoseEstimator:
         )
 
         if not success or reproj_err > 5.0:
-            return self._try_predict(timestamp, result)
+            return self._store_latest(self._try_predict(timestamp, result), image)
 
         # Reject flipped PnP solutions: verify that every detected face's
         # outward normal points toward the camera (negative z in camera frame).
@@ -808,7 +835,8 @@ class CubePoseEstimator:
                     normal_cam = R_est @ normal_obj
                     # Outward normal should face camera (z < 0 in camera frame)
                     if normal_cam[2] > 0:
-                        return self._try_predict(timestamp, result)
+                        return self._store_latest(
+                            self._try_predict(timestamp, result), image)
                     break
 
         # Temporal consistency: reject sudden large jumps from previous pose.
@@ -820,7 +848,8 @@ class CubePoseEstimator:
             # not fast legitimate motion.
             dist_to_cam = float(np.linalg.norm(tvec))
             if dt > dist_to_cam * 0.5 or angle > np.radians(60):
-                return self._try_predict(timestamp, result)
+                return self._store_latest(
+                    self._try_predict(timestamp, result), image)
 
         # Kalman filter update
         n_inlier_count = len(inliers) if inliers is not None else 0
@@ -840,7 +869,7 @@ class CubePoseEstimator:
         result["tvec"] = tvec
         result["reproj_error"] = reproj_err
         result["n_inliers"] = n_inlier_count
-        return result
+        return self._store_latest(result, image)
 
     def draw_result(self, image: np.ndarray, result: dict) -> np.ndarray:
         """Draw detected markers, axes, and wireframe."""
@@ -908,11 +937,14 @@ class CubePoseEstimator:
     # -- Viser integration --------------------------------------------------
 
     def build_viser(self, port: int = 8080):
-        """Create a viser server with the cube scene pre-populated.
+        """Create a viser server and start a background render thread.
 
-        Adds world frame, camera frame (if extrinsic is set), ground grid,
-        textured mesh (from model_dir/mujoco/cube.obj if available), and
-        object axes. Returns the ``viser.ViserServer`` for further customization.
+        The scene is pre-populated with world frame, camera frame, ground grid,
+        textured mesh (from model_dir/mujoco/cube.obj if available), object axes,
+        and a GUI sidebar with camera feed. The background thread automatically
+        renders the latest ``process_frame`` result — no manual update calls needed.
+
+        Returns the ``viser.ViserServer`` for further customization.
 
         Requires ``pip install viser trimesh``.
         """
@@ -920,6 +952,7 @@ class CubePoseEstimator:
         import viser.transforms as vtf
 
         server = viser.ViserServer(port=port)
+        self._viser_server = server
 
         # World frame
         server.scene.add_frame(
@@ -981,110 +1014,71 @@ class CubePoseEstimator:
                 "*Waiting for detection...*"
             )
 
+        # Start background render thread
+        t = threading.Thread(target=self._viser_loop, daemon=True)
+        t.start()
+
         return server
 
-    def update_viser(self, server, result: dict, frame: np.ndarray,
-                     fps: float = 0.0) -> None:
-        """Push one frame's detection result to the viser scene and GUI.
-
-        Call this inside your own loop after ``process_frame``.
-        """
+    def _viser_loop(self) -> None:
+        """Background thread: render latest detection to viser at ~30 fps."""
         import viser.transforms as vtf
 
-        # Update object pose
-        T = self.world_pose(result)
-        if T is not None:
-            T_m = T.copy()
-            T_m[:3, 3] /= 1000.0  # mm -> meters
-            wxyz = tuple(vtf.SO3.from_matrix(T_m[:3, :3]).wxyz)
-            pos = tuple(T_m[:3, 3])
-            server.scene.add_frame(
-                "/object", wxyz=wxyz, position=pos,
-                axes_length=0.0, origin_radius=0.0,
-            )
+        server = self._viser_server
+        while True:
+            # Wait for a new frame
+            counter = self._frame_counter
+            if counter == self._viser_rendered_counter:
+                time.sleep(0.01)
+                continue
+            self._viser_rendered_counter = counter
 
-        # 2D overlay -> GUI sidebar
-        vis = self.draw_result(frame, result)
-        cv2.putText(vis, f"FPS: {fps:.0f}", (10, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-        vis_rgb = cv2.cvtColor(vis, cv2.COLOR_BGR2RGB)
-        if self._viser_gui_image is not None:
-            self._viser_gui_image.image = vis_rgb
+            with self._latest_lock:
+                result = self._latest_result
+                frame = self._latest_frame
+            if result is None or frame is None:
+                time.sleep(0.01)
+                continue
 
-        # Status text
-        if self._viser_gui_status is not None:
-            if result["success"]:
-                t = result["tvec"].flatten()
-                faces = ", ".join(sorted(result["visible_faces"]))
-                self._viser_gui_status.content = (
-                    f"**Tags:** {result['n_tags']} | "
-                    f"**Faces:** {faces}\n\n"
-                    f"**Reproj:** {result['reproj_error']:.2f}px | "
-                    f"**FPS:** {fps:.0f}\n\n"
-                    f"**T:** [{t[0]:.1f}, {t[1]:.1f}, {t[2]:.1f}] mm"
-                )
-            else:
-                self._viser_gui_status.content = (
-                    f"*No detection* | **FPS:** {fps:.0f}"
+            fps = self._fps
+
+            # Update object pose
+            T = self.world_pose(result)
+            if T is not None:
+                T_m = T.copy()
+                T_m[:3, 3] /= 1000.0  # mm -> meters
+                wxyz = tuple(vtf.SO3.from_matrix(T_m[:3, :3]).wxyz)
+                pos = tuple(T_m[:3, 3])
+                server.scene.add_frame(
+                    "/object", wxyz=wxyz, position=pos,
+                    axes_length=0.0, origin_radius=0.0,
                 )
 
-    def run_viser(self, server, camera: int = 0, width: int = 640) -> None:
-        """Blocking webcam capture loop that streams to the viser server.
+            # 2D overlay -> GUI sidebar
+            vis = self.draw_result(frame, result)
+            cv2.putText(vis, f"FPS: {fps:.0f}", (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+            vis_rgb = cv2.cvtColor(vis, cv2.COLOR_BGR2RGB)
+            if self._viser_gui_image is not None:
+                self._viser_gui_image.image = vis_rgb
 
-        Args:
-            server: ViserServer returned by ``build_viser()``.
-            camera: Camera device index.
-            width: Processing width in pixels.
-        """
-        cap = cv2.VideoCapture(camera)
-        if not cap.isOpened():
-            raise RuntimeError(f"Cannot open camera {camera}")
-
-        ret, frame = cap.read()
-        if not ret:
-            cap.release()
-            raise RuntimeError("Cannot read from camera")
-
-        raw_h, raw_w = frame.shape[:2]
-        scale = width / raw_w if raw_w > width else 1.0
-        proc_w = int(raw_w * scale)
-        proc_h = int(raw_h * scale)
-
-        # Resize the GUI image placeholder
-        if self._viser_gui_image is not None:
-            self._viser_gui_image.image = np.zeros(
-                (proc_h, proc_w, 3), dtype=np.uint8
-            )
-
-        fps_t = time.time()
-        fps_n = 0
-        fps = 0.0
-
-        try:
-            while True:
-                ret, frame = cap.read()
-                if not ret:
-                    break
-
-                if scale < 1.0:
-                    frame = cv2.resize(
-                        frame, (proc_w, proc_h),
-                        interpolation=cv2.INTER_LINEAR,
+            # Status text
+            if self._viser_gui_status is not None:
+                if result["success"]:
+                    t = result["tvec"].flatten()
+                    faces = ", ".join(sorted(result["visible_faces"]))
+                    self._viser_gui_status.content = (
+                        f"**Tags:** {result['n_tags']} | "
+                        f"**Faces:** {faces}\n\n"
+                        f"**Reproj:** {result['reproj_error']:.2f}px | "
+                        f"**FPS:** {fps:.0f}\n\n"
+                        f"**T:** [{t[0]:.1f}, {t[1]:.1f}, {t[2]:.1f}] mm"
+                    )
+                else:
+                    self._viser_gui_status.content = (
+                        f"*No detection* | **FPS:** {fps:.0f}"
                     )
 
-                result = self.process_frame(frame)
-
-                fps_n += 1
-                elapsed = time.time() - fps_t
-                if elapsed >= 1.0:
-                    fps = fps_n / elapsed
-                    fps_n = 0
-                    fps_t = time.time()
-
-                self.update_viser(server, result, frame, fps=fps)
-                time.sleep(0.001)
-        finally:
-            cap.release()
 
 
 # ---------------------------------------------------------------------------

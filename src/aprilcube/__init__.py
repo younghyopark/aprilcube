@@ -80,14 +80,17 @@ def detector(
             "my_cube/config.json",
             {"fx": 800, "fy": 800, "cx": 320, "cy": 240},
         )
-        server = det.build_viser(port=8080)
-        det.run_viser(server, camera=0)
+        server = det.build_viser(port=8080)  # auto-renders in background
+        # ... in your loop:
+        result = det.process_frame(frame)  # viser updates automatically
     """
     cube_path = Path(cube_cfg)
+    if cube_path.is_dir():
+        cube_path = cube_path / "config.json"
     config, face_id_sets = load_cube_config(str(cube_path))
 
     # Resolve model directory from config path
-    model_dir = str(cube_path.parent) if cube_path.is_file() else None
+    model_dir = str(cube_path.parent)
 
     camera_matrix, dc = _resolve_intrinsics(intrinsic_cfg)
     if dist_coeffs is not None:
