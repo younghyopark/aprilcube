@@ -128,7 +128,7 @@ def create_detector(dict_id: int, fast: bool = False) -> cv2.aruco.ArucoDetector
     params = cv2.aruco.DetectorParameters()
 
     if fast:
-        # Skip subpix refinement for speed (CONTOUR can crash on some frames)
+        # Skip subpix refinement for speed
         params.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_NONE
 
         # Fewer threshold passes
@@ -173,6 +173,54 @@ def create_detector(dict_id: int, fast: bool = False) -> cv2.aruco.ArucoDetector
     return cv2.aruco.ArucoDetector(dictionary, params)
 
 
+def create_fallback_detector(dict_id: int) -> cv2.aruco.ArucoDetector:
+    """Create a relaxed detector for motion-blurred frames.
+
+    Uses wider thresholding, higher error correction, and looser candidate
+    filtering to recover markers that the primary detector misses.
+    """
+    dictionary = cv2.aruco.getPredefinedDictionary(dict_id)
+    params = cv2.aruco.DetectorParameters()
+
+    params.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_NONE
+
+    # Wider adaptive threshold range with finer steps
+    params.adaptiveThreshWinSizeMin = 3
+    params.adaptiveThreshWinSizeMax = 63
+    params.adaptiveThreshWinSizeStep = 6
+
+    # Very relaxed candidate filtering — blurred quads are rounder
+    params.minMarkerPerimeterRate = 0.01
+    params.maxMarkerPerimeterRate = 4.0
+    params.polygonalApproxAccuracyRate = 0.08
+    params.minCornerDistanceRate = 0.02
+    params.minDistanceToBorder = 1
+
+    # Higher error correction to tolerate bit corruption from blur
+    params.perspectiveRemovePixelPerCell = 8
+    params.perspectiveRemoveIgnoredMarginPerCell = 0.2
+    params.errorCorrectionRate = 1.0
+
+    # Lower thresholds for edge detection on soft images
+    params.minMarkerDistanceRate = 0.01
+
+    return cv2.aruco.ArucoDetector(dictionary, params)
+
+
+def _sharpen(gray: np.ndarray) -> np.ndarray:
+    """Lightweight unsharp mask to recover edges from motion blur."""
+    blurred = cv2.GaussianBlur(gray, (0, 0), sigmaX=2.0)
+    return cv2.addWeighted(gray, 1.5, blurred, -0.5, 0)
+
+
+_clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+
+
+def _preprocess(gray: np.ndarray) -> np.ndarray:
+    """CLAHE contrast normalization for robust marker detection."""
+    return _clahe.apply(gray)
+
+
 # ---------------------------------------------------------------------------
 # Pose estimation
 # ---------------------------------------------------------------------------
@@ -194,31 +242,62 @@ def estimate_pose(
 
     use_guess = prev_rvec is not None and prev_tvec is not None
 
+    # ITERATIVE with prior disambiguates coplanar (single-tag) cases;
+    # SQPNP is globally optimal for cold starts (no local-minimum risk).
+    pnp_flag = cv2.SOLVEPNP_ITERATIVE if use_guess else cv2.SOLVEPNP_SQPNP
+
     if n_points >= 6:
-        success, rvec, tvec, inliers = cv2.solvePnPRansac(
-            objectPoints=object_points,
-            imagePoints=image_points,
-            cameraMatrix=camera_matrix,
-            distCoeffs=dist_coeffs,
-            rvec=prev_rvec.copy() if use_guess else None,
-            tvec=prev_tvec.copy() if use_guess else None,
-            useExtrinsicGuess=use_guess,
-            iterationsCount=200,
-            reprojectionError=3.0,
-            confidence=0.99,
-            flags=cv2.SOLVEPNP_SQPNP,
-        )
+        try:
+            success, rvec, tvec, inliers = cv2.solvePnPRansac(
+                objectPoints=object_points,
+                imagePoints=image_points,
+                cameraMatrix=camera_matrix,
+                distCoeffs=dist_coeffs,
+                rvec=prev_rvec.copy() if use_guess else None,
+                tvec=prev_tvec.copy() if use_guess else None,
+                useExtrinsicGuess=use_guess,
+                iterationsCount=200,
+                reprojectionError=3.0,
+                confidence=0.99,
+                flags=pnp_flag,
+            )
+        except cv2.error:
+            success, rvec, tvec, inliers = cv2.solvePnPRansac(
+                objectPoints=object_points,
+                imagePoints=image_points,
+                cameraMatrix=camera_matrix,
+                distCoeffs=dist_coeffs,
+                rvec=prev_rvec.copy() if use_guess else None,
+                tvec=prev_tvec.copy() if use_guess else None,
+                useExtrinsicGuess=use_guess,
+                iterationsCount=200,
+                reprojectionError=3.0,
+                confidence=0.99,
+                flags=cv2.SOLVEPNP_ITERATIVE,
+            )
     else:
-        success, rvec, tvec = cv2.solvePnP(
-            objectPoints=object_points,
-            imagePoints=image_points,
-            cameraMatrix=camera_matrix,
-            distCoeffs=dist_coeffs,
-            rvec=prev_rvec.copy() if use_guess else None,
-            tvec=prev_tvec.copy() if use_guess else None,
-            useExtrinsicGuess=use_guess,
-            flags=cv2.SOLVEPNP_SQPNP,
-        )
+        try:
+            success, rvec, tvec = cv2.solvePnP(
+                objectPoints=object_points,
+                imagePoints=image_points,
+                cameraMatrix=camera_matrix,
+                distCoeffs=dist_coeffs,
+                rvec=prev_rvec.copy() if use_guess else None,
+                tvec=prev_tvec.copy() if use_guess else None,
+                useExtrinsicGuess=use_guess,
+                flags=pnp_flag,
+            )
+        except cv2.error:
+            success, rvec, tvec = cv2.solvePnP(
+                objectPoints=object_points,
+                imagePoints=image_points,
+                cameraMatrix=camera_matrix,
+                distCoeffs=dist_coeffs,
+                rvec=prev_rvec.copy() if use_guess else None,
+                tvec=prev_tvec.copy() if use_guess else None,
+                useExtrinsicGuess=use_guess,
+                flags=cv2.SOLVEPNP_ITERATIVE,
+            )
         inliers = np.arange(n_points).reshape(-1, 1) if success else None
 
     if not success:
@@ -297,7 +376,7 @@ class PoseFilter:
 # Quaternion utilities (Hamilton convention: q = [w, x, y, z])
 # ---------------------------------------------------------------------------
 def _rvec_to_quat(rvec: np.ndarray) -> np.ndarray:
-    """Rodrigues (3,) or (3,1) → unit quaternion [w, x, y, z]."""
+    """Rodrigues (3,) or (3,1) → unit quaternion [w, x, y, z], always w >= 0."""
     r = rvec.flatten()
     angle = float(np.linalg.norm(r))
     if angle < 1e-10:
@@ -305,18 +384,23 @@ def _rvec_to_quat(rvec: np.ndarray) -> np.ndarray:
     axis = r / angle
     ha = angle / 2
     sa = np.sin(ha)
-    return np.array([np.cos(ha), sa * axis[0], sa * axis[1], sa * axis[2]])
+    q = np.array([np.cos(ha), sa * axis[0], sa * axis[1], sa * axis[2]])
+    # Canonicalize to w >= 0 hemisphere (q and -q are the same rotation)
+    if q[0] < 0:
+        q = -q
+    return q
 
 
 def _quat_to_rvec(q: np.ndarray) -> np.ndarray:
-    """Unit quaternion [w, x, y, z] → Rodrigues (3, 1)."""
+    """Unit quaternion [w, x, y, z] → Rodrigues (3, 1), angle in [0, π]."""
+    # Canonicalize to w >= 0
+    if q[0] < 0:
+        q = -q
     w, x, y, z = q
     sin_ha = np.sqrt(x * x + y * y + z * z)
     if sin_ha < 1e-10:
         return np.zeros((3, 1))
-    angle = 2.0 * np.arctan2(sin_ha, abs(w))
-    if w < 0:
-        angle = -angle
+    angle = 2.0 * np.arctan2(sin_ha, w)
     axis = np.array([x, y, z]) / sin_ha
     return (angle * axis).reshape(3, 1)
 
@@ -339,13 +423,14 @@ def _quat_conj(q: np.ndarray) -> np.ndarray:
 
 def _quat_to_rotvec(q: np.ndarray) -> np.ndarray:
     """Quaternion → rotation vector (3,). Handles small angles."""
+    # Canonicalize to w >= 0 (same rotation, avoids sign discontinuity)
+    if q[0] < 0:
+        q = -q
     w, x, y, z = q
     sin_ha = np.sqrt(x * x + y * y + z * z)
     if sin_ha < 1e-10:
         return 2.0 * np.array([x, y, z])
-    angle = 2.0 * np.arctan2(sin_ha, abs(w))
-    if w < 0:
-        angle = -angle
+    angle = 2.0 * np.arctan2(sin_ha, w)
     return angle * np.array([x, y, z]) / sin_ha
 
 
@@ -367,13 +452,21 @@ class PoseSnapshot(NamedTuple):
 @dataclass
 class KalmanFilterConfig:
     """Tuning knobs for KalmanPoseFilter."""
-    # Process noise (constant-velocity model)
-    sigma_accel: float = 2000.0      # mm/s², translation
-    sigma_alpha: float = 30.0        # rad/s², rotation
+    # Process noise (constant-velocity model) — adaptive range
+    sigma_accel_low: float = 100.0   # mm/s², when stationary
+    sigma_accel_high: float = 2000.0 # mm/s², when moving fast
+    sigma_alpha_low: float = 2.0     # rad/s², when stationary
+    sigma_alpha_high: float = 30.0   # rad/s², when moving fast
+
+    # Velocity thresholds for interpolating process noise
+    vel_low: float = 5.0             # mm/s — below this, use _low noise
+    vel_high: float = 200.0          # mm/s — above this, use _high noise
+    omega_low: float = 0.1           # rad/s
+    omega_high: float = 3.0          # rad/s
 
     # Base measurement noise (scaled adaptively per frame)
-    base_sigma_t: float = 1.0        # mm
-    base_sigma_r: float = 0.005      # rad
+    base_sigma_t: float = 3.0        # mm
+    base_sigma_r: float = 0.02       # rad
 
     # Innovation gating (Mahalanobis distance thresholds)
     mahal_gate: float = 16.0         # soft reject above this
@@ -381,13 +474,13 @@ class KalmanFilterConfig:
     max_outliers_before_reset: int = 3
 
     # Initialization covariance
-    init_sigma_pos: float = 50.0     # mm
-    init_sigma_vel: float = 500.0    # mm/s
-    init_sigma_rot: float = 0.5      # rad
-    init_sigma_omega: float = 5.0    # rad/s
+    init_sigma_pos: float = 20.0     # mm
+    init_sigma_vel: float = 100.0    # mm/s
+    init_sigma_rot: float = 0.2      # rad
+    init_sigma_omega: float = 2.0    # rad/s
 
     # Limits
-    max_predict_dt: float = 0.1      # seconds without measurement before reset
+    max_predict_dt: float = 0.1      # seconds — coast on velocity before reset
 
     # History buffer
     history_size: int = 300          # ~10 s at 30 fps
@@ -591,12 +684,34 @@ class KalmanPoseFilter:
         self._initialized = True
         self._outlier_count = 0
 
+    @staticmethod
+    def _lerp_clamp(val: float, lo: float, hi: float) -> float:
+        """Map val from [lo, hi] to [0, 1], clamped."""
+        if hi <= lo:
+            return 0.0
+        return max(0.0, min(1.0, (val - lo) / (hi - lo)))
+
+    def _adaptive_process_noise(self) -> tuple[float, float]:
+        """Return (sigma_accel, sigma_alpha) scaled by current velocity."""
+        c = self.cfg
+        speed = float(np.linalg.norm(self._x_t[3:6]))
+        omega_speed = float(np.linalg.norm(self._x_r[3:6]))
+
+        t_frac = self._lerp_clamp(speed, c.vel_low, c.vel_high)
+        r_frac = self._lerp_clamp(omega_speed, c.omega_low, c.omega_high)
+
+        sigma_a = c.sigma_accel_low + t_frac * (c.sigma_accel_high - c.sigma_accel_low)
+        sigma_r = c.sigma_alpha_low + r_frac * (c.sigma_alpha_high - c.sigma_alpha_low)
+        return sigma_a, sigma_r
+
     def _predict(self, dt: float):
+        sigma_accel, sigma_alpha = self._adaptive_process_noise()
+
         # translation
         F = np.eye(6)
         F[0, 3] = F[1, 4] = F[2, 5] = dt
         self._x_t = F @ self._x_t
-        self._P_t = F @ self._P_t @ F.T + self._build_Q(dt, self.cfg.sigma_accel)
+        self._P_t = F @ self._P_t @ F.T + self._build_Q(dt, sigma_accel)
 
         # rotate nominal quaternion by angular velocity
         omega = self._x_r[3:6]
@@ -613,7 +728,7 @@ class KalmanPoseFilter:
         F_r[0, 3] = F_r[1, 4] = F_r[2, 5] = dt
         self._x_r = F_r @ self._x_r
         self._x_r[:3] = 0.0  # error always reset
-        self._P_r = F_r @ self._P_r @ F_r.T + self._build_Q(dt, self.cfg.sigma_alpha)
+        self._P_r = F_r @ self._P_r @ F_r.T + self._build_Q(dt, sigma_alpha)
 
     @staticmethod
     def _build_Q(dt: float, sigma: float) -> np.ndarray:
@@ -636,6 +751,7 @@ class KalmanPoseFilter:
         n_pts = n_tags * 4
         inlier_ratio = n_inliers / max(n_pts, 1)
         inlier_factor = max(1.0, 1.0 / max(inlier_ratio, 0.3))
+
         scale = reproj_factor * tag_factor * inlier_factor
 
         st = self.cfg.base_sigma_t * scale
@@ -684,12 +800,23 @@ class CubePoseEstimator:
         self.valid_ids = set(self.tag_corner_map.keys())
         self.face_id_sets = face_id_sets
         self.detector = create_detector(config.dict_id, fast=fast)
+        self.fallback_detector = create_fallback_detector(config.dict_id)
         self.pose_filter: KalmanPoseFilter | None = (
             KalmanPoseFilter(filter_config) if enable_filter else None
         )
 
         self.prev_rvec: np.ndarray | None = None
         self.prev_tvec: np.ndarray | None = None
+
+        # Optical flow state: track corners across frames when detection fails
+        self._prev_gray: np.ndarray | None = None
+        self._prev_corners_2d: np.ndarray | None = None  # (N, 2) float32
+        self._prev_corners_3d: np.ndarray | None = None  # (N, 3) float64
+        self._flow_lk_params = dict(
+            winSize=(31, 31),
+            maxLevel=4,
+            criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.01),
+        )
 
         # Box wireframe corners for visualization
         bx, by, bz = config.box_dims
@@ -739,6 +866,165 @@ class CubePoseEstimator:
             self.pose_filter.reset()
         return result
 
+    def _recover_rejected(
+        self,
+        detections: list[tuple[int, np.ndarray]],
+        seen_ids: set[int],
+        rejected_quads: list,
+        prior_rvec: np.ndarray,
+        prior_tvec: np.ndarray,
+        max_corner_dist: float = 15.0,
+    ) -> list[tuple[int, np.ndarray]]:
+        """Match rejected ArUco candidates against predicted tag positions.
+
+        For each undetected tag, project its 3D corners using the prior pose
+        and check if any rejected quad's corners are close. If so, adopt that
+        quad's corners as a detection for that tag.
+        """
+        if not rejected_quads:
+            return detections
+
+        # Project all undetected tags
+        undetected = [
+            tid for tid in self.valid_ids if tid not in seen_ids
+        ]
+        if not undetected:
+            return detections
+
+        # Only consider tags on camera-facing faces
+        R_prior, _ = cv2.Rodrigues(prior_rvec)
+        candidates = []  # (tag_id, projected_corners_2d (4,2))
+        for tid in undetected:
+            # Check if this tag's face normal points toward camera
+            face_normal = None
+            for fd in FACE_DEFS:
+                for face_name, id_set in self.face_id_sets.items():
+                    if fd[0] == face_name and tid in id_set:
+                        n = np.zeros(3)
+                        n[fd[1]] = fd[2]
+                        face_normal = n
+                        break
+                if face_normal is not None:
+                    break
+            if face_normal is not None:
+                normal_cam = R_prior @ face_normal
+                if normal_cam[2] > 0:  # back-facing
+                    continue
+
+            obj_corners = self.tag_corner_map[tid]  # (4, 3)
+            proj, _ = cv2.projectPoints(
+                obj_corners, prior_rvec, prior_tvec,
+                self.camera_matrix, self.dist_coeffs,
+            )
+            proj_2d = proj.reshape(4, 2)
+            # Skip tags projected outside image or behind camera
+            if np.any(proj_2d < -50) or np.any(proj_2d > 2000):
+                continue
+            candidates.append((tid, proj_2d))
+
+        if not candidates:
+            return detections
+
+        # Match each rejected quad against candidate projections
+        for quad in rejected_quads:
+            quad_pts = quad.reshape(4, 2) if quad.shape != (4, 2) else quad
+            best_tid = None
+            best_dist = max_corner_dist
+            for tid, proj_2d in candidates:
+                # Mean distance across all 4 corners
+                dist = float(np.mean(np.linalg.norm(quad_pts - proj_2d, axis=1)))
+                if dist < best_dist:
+                    best_dist = dist
+                    best_tid = tid
+
+            if best_tid is not None:
+                detections.append((best_tid, quad_pts))
+                seen_ids.add(best_tid)
+                # Remove from candidates so we don't double-match
+                candidates = [(t, p) for t, p in candidates if t != best_tid]
+                if not candidates:
+                    break
+
+        return detections
+
+    def _track_corners_optflow(
+        self, gray: np.ndarray,
+        predicted_rvec: np.ndarray | None = None,
+        predicted_tvec: np.ndarray | None = None,
+    ) -> tuple[np.ndarray, np.ndarray] | None:
+        """Track previous frame's corners into current frame using optical flow.
+
+        If a predicted pose is available (from KF), projects where corners should
+        be in the current frame and uses that as initial guess for LK — this
+        allows tracking through large displacements (abrupt motion).
+
+        Returns (object_points, image_points) or None if tracking fails.
+        """
+        if (self._prev_gray is None or self._prev_corners_2d is None
+                or len(self._prev_corners_2d) < 4):
+            return None
+
+        prev_pts = self._prev_corners_2d.reshape(-1, 1, 2).astype(np.float32)
+
+        # If we have a KF prediction, project 3D corners to get initial guess
+        # for where points moved to. This is critical for large displacements.
+        init_guess = None
+        if predicted_rvec is not None and predicted_tvec is not None:
+            proj, _ = cv2.projectPoints(
+                self._prev_corners_3d, predicted_rvec, predicted_tvec,
+                self.camera_matrix, self.dist_coeffs,
+            )
+            init_guess = proj.reshape(-1, 1, 2).astype(np.float32)
+
+        lk_flags = cv2.OPTFLOW_USE_INITIAL_FLOW if init_guess is not None else 0
+        lk_params = {**self._flow_lk_params, "flags": lk_flags}
+
+        curr_pts, status, err = cv2.calcOpticalFlowPyrLK(
+            self._prev_gray, gray, prev_pts,
+            init_guess if init_guess is not None else None,
+            **lk_params,
+        )
+
+        if curr_pts is None or status is None:
+            return None
+
+        # Forward-backward consistency check: track back and verify
+        back_pts, back_status, _ = cv2.calcOpticalFlowPyrLK(
+            gray, self._prev_gray, curr_pts, None, **self._flow_lk_params,
+        )
+        if back_pts is None:
+            return None
+
+        # Keep only points that survived both passes and are consistent
+        fb_dist = np.linalg.norm(
+            prev_pts.reshape(-1, 2) - back_pts.reshape(-1, 2), axis=1
+        )
+        # Relax FB threshold when using predicted hint (motion is large)
+        fb_thresh = 4.0 if init_guess is not None else 2.0
+        good = (status.flatten() == 1) & (back_status.flatten() == 1) & (fb_dist < fb_thresh)
+
+        if good.sum() < 4:
+            return None
+
+        obj_pts = self._prev_corners_3d[good]
+        img_pts = curr_pts.reshape(-1, 2)[good]
+        return obj_pts.astype(np.float64), img_pts.astype(np.float64)
+
+    def _save_corners_for_flow(
+        self, gray: np.ndarray, detections: list[tuple[int, np.ndarray]]
+    ):
+        """Store current frame's detected corners for next frame's optical flow."""
+        if not detections:
+            return
+        corners_2d = []
+        corners_3d = []
+        for tag_id, c2d in detections:
+            corners_2d.append(c2d)
+            corners_3d.append(self.tag_corner_map[tag_id])
+        self._prev_gray = gray.copy()
+        self._prev_corners_2d = np.vstack(corners_2d).astype(np.float32)
+        self._prev_corners_3d = np.vstack(corners_3d).astype(np.float64)
+
     def _store_latest(self, result: dict, frame: np.ndarray) -> dict:
         """Store the latest result/frame for the viser background thread."""
         with self._latest_lock:
@@ -775,24 +1061,84 @@ class CubePoseEstimator:
 
         # Detect
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if len(image.shape) == 3 else image
-        corners_list, ids, _ = self.detector.detectMarkers(gray)
-        if ids is None:
-            return self._store_latest(self._try_predict(timestamp, result), image)
+        enhanced = _preprocess(gray)
+        try:
+            corners_list, ids, rejected = self.detector.detectMarkers(enhanced)
+        except cv2.error:
+            corners_list, ids, rejected = (), None, ()
 
-        # Filter to valid cube IDs
-        detections = []
-        for i in range(len(ids)):
-            tag_id = int(ids[i][0])
-            if tag_id in self.valid_ids:
-                corners_2d = corners_list[i].reshape(4, 2)
-                detections.append((tag_id, corners_2d))
+        # Collect valid detections from primary pass
+        detections: list[tuple[int, np.ndarray]] = []
+        seen_ids: set[int] = set()
+        if ids is not None:
+            for i in range(len(ids)):
+                tag_id = int(ids[i][0])
+                if tag_id in self.valid_ids:
+                    detections.append((tag_id, corners_list[i].reshape(4, 2)))
+                    seen_ids.add(tag_id)
+
+        # Fallback: sharpen + relaxed detector only when primary finds nothing
+        fb_rejected: tuple = ()
+        if len(detections) == 0 and self.prev_rvec is not None:
+            sharp = _sharpen(enhanced)
+            try:
+                fb_corners, fb_ids, fb_rejected = self.fallback_detector.detectMarkers(sharp)
+            except cv2.error:
+                fb_corners, fb_ids, fb_rejected = (), None, ()
+            if fb_ids is not None:
+                for i in range(len(fb_ids)):
+                    tag_id = int(fb_ids[i][0])
+                    if tag_id in self.valid_ids and tag_id not in seen_ids:
+                        detections.append((tag_id, fb_corners[i].reshape(4, 2)))
+                        seen_ids.add(tag_id)
+
+        # Recover rejected candidates using predicted pose geometry.
+        # Rejected quads failed bit-decoding (e.g. from blur) but may still
+        # correspond to real tags. Match them against projected tag positions.
+        all_rejected = list(rejected or []) + list(fb_rejected or [])
+        if all_rejected and self.prev_rvec is not None:
+            detections = self._recover_rejected(
+                detections, seen_ids, all_rejected,
+                self.prev_rvec, self.prev_tvec,
+            )
 
         result["detections"] = detections
         result["n_tags"] = len(detections)
         result["tag_ids"] = [d[0] for d in detections]
 
-        if not detections:
+        # Aggregate 2D-3D correspondences from ArUco detections
+        obj_pts = []
+        img_pts = []
+        for tag_id, corners_2d in detections:
+            obj_pts.append(self.tag_corner_map[tag_id])
+            img_pts.append(corners_2d)
+
+        # Optical flow: track corners from previous frame.
+        # Use KF prediction as initial guess so LK can handle large displacements.
+        # When ArUco finds 0 tags: use flow as sole source.
+        # When ArUco finds few tags: augment with flow corners (excluding already-detected tags).
+        used_flow = False
+        flow_pred_rv, flow_pred_tv = None, None
+        if self.pose_filter and self.pose_filter.is_initialized:
+            pred = self.pose_filter.predict(timestamp)
+            if pred is not None:
+                flow_pred_rv, flow_pred_tv = pred
+        elif self.prev_rvec is not None:
+            flow_pred_rv, flow_pred_tv = self.prev_rvec, self.prev_tvec
+
+        if len(detections) == 0:
+            flow_result = self._track_corners_optflow(gray, flow_pred_rv, flow_pred_tv)
+            if flow_result is not None:
+                obj_pts.append(flow_result[0])
+                img_pts.append(flow_result[1])
+                used_flow = True
+
+        if not obj_pts:
+            self._prev_gray = gray.copy()  # still save for next frame's flow
             return self._store_latest(self._try_predict(timestamp, result), image)
+
+        object_points = np.vstack(obj_pts).astype(np.float64)
+        image_points = np.vstack(img_pts).astype(np.float64)
 
         # Identify visible faces
         for tag_id, _ in detections:
@@ -800,19 +1146,14 @@ class CubePoseEstimator:
                 if tag_id in id_set:
                     result["visible_faces"].add(face_name)
 
-        # Aggregate 2D-3D correspondences
-        obj_pts = []
-        img_pts = []
-        for tag_id, corners_2d in detections:
-            obj_pts.append(self.tag_corner_map[tag_id])
-            img_pts.append(corners_2d)
-        object_points = np.vstack(obj_pts).astype(np.float64)
-        image_points = np.vstack(img_pts).astype(np.float64)
-
-        # Use last measured pose as PnP initial guess (not KF prediction,
-        # which can drift and pull PnP to wrong solutions)
+        # PnP initial guess: prefer KF-filtered prev pose; if unavailable
+        # (after dropout/reset), use KF prediction to seed re-initialization.
         pnp_rv_guess = self.prev_rvec
         pnp_tv_guess = self.prev_tvec
+        if pnp_rv_guess is None and self.pose_filter and self.pose_filter.is_initialized:
+            pred = self.pose_filter.predict(timestamp)
+            if pred is not None:
+                pnp_rv_guess, pnp_tv_guess = pred
 
         # Solve PnP
         success, rvec, tvec, reproj_err, inliers = estimate_pose(
@@ -821,7 +1162,11 @@ class CubePoseEstimator:
             pnp_rv_guess, pnp_tv_guess,
         )
 
-        if not success or reproj_err > 5.0:
+        # Flow-tracked points are noisier — allow looser reproj
+        max_reproj = 3.0
+        if used_flow:
+            max_reproj = 5.0
+        if not success or reproj_err > max_reproj:
             return self._store_latest(self._try_predict(timestamp, result), image)
 
         # Reject flipped PnP solutions: verify that every detected face's
@@ -839,30 +1184,53 @@ class CubePoseEstimator:
                             self._try_predict(timestamp, result), image)
                     break
 
-        # Temporal consistency: reject sudden large jumps from previous pose.
+        # Temporal consistency: reject sudden large jumps.
+        # Scale the gate by estimated velocity so fast motion isn't rejected.
         if self.prev_rvec is not None:
-            dt = float(np.linalg.norm(tvec.flatten() - self.prev_tvec.flatten()))
+            jump_mm = float(np.linalg.norm(tvec.flatten() - self.prev_tvec.flatten()))
             R_prev, _ = cv2.Rodrigues(self.prev_rvec)
             angle = np.arccos(np.clip((np.trace(R_prev.T @ R_est) - 1) / 2, -1, 1))
-            # Allow generous thresholds — only reject clearly wrong flips,
-            # not fast legitimate motion.
-            dist_to_cam = float(np.linalg.norm(tvec))
-            if dt > dist_to_cam * 0.5 or angle > np.radians(60):
+            # Base gates + velocity-scaled headroom
+            max_jump_mm = 100.0
+            max_angle = np.radians(45)
+            if self.pose_filter and self.pose_filter.is_initialized:
+                speed = float(np.linalg.norm(self.pose_filter._x_t[3:6]))  # mm/s
+                omega = float(np.linalg.norm(self.pose_filter._x_r[3:6]))  # rad/s
+                dt = max(timestamp - self.pose_filter._last_ts, 1 / 60)
+                max_jump_mm = max(100.0, speed * dt * 3.0)
+                max_angle = max(np.radians(45), omega * dt * 3.0)
+            if jump_mm > max_jump_mm or angle > max_angle:
+                return self._store_latest(
+                    self._try_predict(timestamp, result), image)
+        else:
+            # Re-initialization after dropout — require reasonable reproj error
+            if reproj_err > 2.5:
                 return self._store_latest(
                     self._try_predict(timestamp, result), image)
 
         # Kalman filter update
         n_inlier_count = len(inliers) if inliers is not None else 0
+        # Inflate reproj error for flow measurements so KF trusts them less
+        kf_reproj = reproj_err
+        if used_flow:
+            kf_reproj = reproj_err * 3.0
+        kf_n_tags = max(len(detections), 1)
         if self.pose_filter:
             rvec, tvec = self.pose_filter.update(
                 rvec, tvec, timestamp,
-                reproj_error=reproj_err,
-                n_tags=len(detections),
+                reproj_error=kf_reproj,
+                n_tags=kf_n_tags,
                 n_inliers=n_inlier_count,
             )
 
         self.prev_rvec = rvec.copy()
         self.prev_tvec = tvec.copy()
+
+        # Save corners for next frame's optical flow tracking.
+        if detections:
+            self._save_corners_for_flow(gray, detections)
+        elif not used_flow:
+            self._prev_gray = gray.copy()
 
         result["success"] = True
         result["rvec"] = rvec
@@ -909,8 +1277,8 @@ class CubePoseEstimator:
             f"Reproj: {err:.2f}px" if result["success"] else "No pose",
         ]
         if result["success"]:
-            t = result["tvec"].flatten()
-            lines.append(f"T: [{t[0]:.1f}, {t[1]:.1f}, {t[2]:.1f}] mm")
+            t = result["tvec"].flatten() / 1000.0  # mm -> meters
+            lines.append(f"T: [{t[0]:.4f}, {t[1]:.4f}, {t[2]:.4f}] m")
         for i, line in enumerate(lines):
             y = h - 10 - (len(lines) - 1 - i) * 25
             cv2.putText(vis, line, (10, y), cv2.FONT_HERSHEY_SIMPLEX,
@@ -921,6 +1289,7 @@ class CubePoseEstimator:
     def world_pose(self, result: dict) -> np.ndarray | None:
         """Return 4x4 object-in-world transform from a process_frame result.
 
+        Translation is in **meters**.
         If extrinsic (T_world_cam) is set, returns T_world_cam @ T_cam_obj.
         Otherwise returns T_cam_obj directly.
         Returns None if result has no pose.
@@ -929,7 +1298,7 @@ class CubePoseEstimator:
             return None
         T = np.eye(4)
         T[:3, :3], _ = cv2.Rodrigues(result["rvec"])
-        T[:3, 3] = result["tvec"].flatten()
+        T[:3, 3] = result["tvec"].flatten() / 1000.0  # mm -> meters
         if self.extrinsic is not None:
             T = self.extrinsic @ T
         return T
@@ -982,6 +1351,11 @@ class CubePoseEstimator:
             points=np.array(grid_lines, dtype=np.float32),
             colors=(80, 80, 80),
             line_width=1.0,
+        )
+
+        # Object frame (created once, updated in _viser_loop via properties)
+        self._viser_object_frame = server.scene.add_frame(
+            "/object", axes_length=0.0, origin_radius=0.0,
         )
 
         # Textured mesh
@@ -1045,14 +1419,8 @@ class CubePoseEstimator:
             # Update object pose
             T = self.world_pose(result)
             if T is not None:
-                T_m = T.copy()
-                T_m[:3, 3] /= 1000.0  # mm -> meters
-                wxyz = tuple(vtf.SO3.from_matrix(T_m[:3, :3]).wxyz)
-                pos = tuple(T_m[:3, 3])
-                server.scene.add_frame(
-                    "/object", wxyz=wxyz, position=pos,
-                    axes_length=0.0, origin_radius=0.0,
-                )
+                self._viser_object_frame.wxyz = vtf.SO3.from_matrix(T[:3, :3]).wxyz
+                self._viser_object_frame.position = T[:3, 3]
 
             # 2D overlay -> GUI sidebar
             vis = self.draw_result(frame, result)
@@ -1065,14 +1433,14 @@ class CubePoseEstimator:
             # Status text
             if self._viser_gui_status is not None:
                 if result["success"]:
-                    t = result["tvec"].flatten()
+                    t = result["tvec"].flatten() / 1000.0  # mm -> meters
                     faces = ", ".join(sorted(result["visible_faces"]))
                     self._viser_gui_status.content = (
                         f"**Tags:** {result['n_tags']} | "
                         f"**Faces:** {faces}\n\n"
                         f"**Reproj:** {result['reproj_error']:.2f}px | "
                         f"**FPS:** {fps:.0f}\n\n"
-                        f"**T:** [{t[0]:.1f}, {t[1]:.1f}, {t[2]:.1f}] mm"
+                        f"**T:** [{t[0]:.4f}, {t[1]:.4f}, {t[2]:.4f}] m"
                     )
                 else:
                     self._viser_gui_status.content = (
@@ -1198,9 +1566,9 @@ def main():
         result = estimator.process_frame(frame)
         if result["success"]:
             r = result["rvec"].flatten()
-            t = result["tvec"].flatten()
+            t = result["tvec"].flatten() / 1000.0  # mm -> meters
             print(f"Pose: rvec=[{r[0]:.4f}, {r[1]:.4f}, {r[2]:.4f}] "
-                  f"tvec=[{t[0]:.1f}, {t[1]:.1f}, {t[2]:.1f}] mm")
+                  f"tvec=[{t[0]:.4f}, {t[1]:.4f}, {t[2]:.4f}] m")
             print(f"  reproj={result['reproj_error']:.2f}px, "
                   f"tags={result['n_tags']}/{len(config.tag_ids)}, "
                   f"faces={','.join(sorted(result['visible_faces']))}")
@@ -1247,10 +1615,10 @@ def main():
 
         if result["success"]:
             r = result["rvec"].flatten()
-            t = result["tvec"].flatten()
+            t = result["tvec"].flatten() / 1000.0  # mm -> meters
             faces = ",".join(sorted(result["visible_faces"]))
             print(f"\rrvec=[{r[0]:+.3f},{r[1]:+.3f},{r[2]:+.3f}] "
-                  f"tvec=[{t[0]:+.0f},{t[1]:+.0f},{t[2]:+.0f}]mm "
+                  f"tvec=[{t[0]:+.4f},{t[1]:+.4f},{t[2]:+.4f}]m "
                   f"err={result['reproj_error']:.1f}px "
                   f"tags={result['n_tags']} faces={faces} "
                   f"fps={fps_display:.0f}",
