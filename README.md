@@ -14,10 +14,7 @@ The cube geometry is fully parameterized: grid layout, tag dictionary, tag size,
 ## Installation
 
 ```bash
-pip install .
-
-# Or editable install for development
-pip install -e .
+pip install aprilcube
 ```
 
 Requires Python 3.10+ and installs `opencv-contrib-python` and `numpy`.
