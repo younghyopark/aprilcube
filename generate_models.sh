@@ -34,7 +34,7 @@ for entry in "${MODELS[@]}"; do
     name="${grid}_${tag_size}_cube"
     out="$MODELS_DIR/$name"
     echo "=== $name ==="
-    python generate_cube.py \
+    aprilcube generate \
         --grid "$grid" \
         --dict "$DICT" \
         --tag-size "$tag_size" \

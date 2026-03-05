@@ -2,6 +2,9 @@
 __pycache__/
 *.pyc
 *.pyo
+*.egg-info/
+dist/
+build/
 
 # Generated output directories (cube.3mf, config.json, etc.)
 # models/
@@ -23,3 +26,5 @@ __pycache__/
 
 # Claude Code
 .claude/
+
+generate_models.sh

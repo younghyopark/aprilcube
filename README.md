@@ -6,49 +6,96 @@ Generate 3D-printable cubes/cuboids with ArUco or AprilTag fiducial markers on a
 
 **aprilcube** is a two-part pipeline:
 
-1. **`generate_cube.py`** — Creates a multi-color 3MF file with markers on every face, ready for dual-color 3D printing (Bambu Studio / AMS)
-2. **`detect_cube.py`** — Detects the cube in a camera image and estimates its full 6-DOF pose (rotation + translation)
+1. **Generator** — Creates a multi-color 3MF file with markers on every face, ready for dual-color 3D printing (Bambu Studio / AMS)
+2. **Detector** — Detects the cube in a camera image and estimates its full 6-DOF pose (rotation + translation)
 
-The cube geometry is fully parameterized: grid layout, tag dictionary, tag size, margins, borders. Both scripts share the same config, so the detector knows the exact 3D position of every tag corner.
-
+The cube geometry is fully parameterized: grid layout, tag dictionary, tag size, margins, borders. Both modules share the same config, so the detector knows the exact 3D position of every tag corner.
 
 ## Installation
 
 ```bash
-pip install opencv-contrib-python numpy
+pip install .
+
+# Or editable install for development
+pip install -e .
 ```
 
-## Quick Start
+Requires Python 3.10+ and installs `opencv-contrib-python` and `numpy`.
+
+## Python API
+
+```python
+import aprilcube
+
+# Create a detector from config.json and camera intrinsics
+det = aprilcube.detector("my_cube/config.json", {"fx": 800, "fy": 800, "cx": 320, "cy": 240})
+
+# Process a frame (BGR numpy array)
+result = det.process_frame(frame)
+
+if result["success"]:
+    rvec = result["rvec"]       # Rodrigues rotation vector (3x1)
+    tvec = result["tvec"]       # Translation vector in mm (3x1)
+    error = result["reproj_error"]  # Reprojection error in pixels
+    faces = result["visible_faces"] # Set of visible face names
+```
+
+### `aprilcube.detector(cube_cfg, intrinsic_cfg, **kwargs)`
+
+Creates a `CubePoseEstimator` ready to process frames.
+
+| Arg | Type | Description |
+|-----|------|-------------|
+| `cube_cfg` | `str \| Path` | Path to `config.json` from `aprilcube generate` |
+| `intrinsic_cfg` | `str \| Path \| dict \| np.ndarray` | Camera intrinsics (see below) |
+| `enable_filter` | `bool` | Enable Kalman temporal smoothing (default: `True`) |
+| `filter_config` | `KalmanFilterConfig \| None` | Custom filter tuning |
+| `dist_coeffs` | `np.ndarray \| None` | Override distortion coefficients |
+
+**`intrinsic_cfg` formats:**
+
+```python
+# Path to calibration JSON (keys: "camera_matrix", optional "dist_coeffs")
+det = aprilcube.detector("config.json", "calib.json")
+
+# Dict with fx, fy, cx, cy
+det = aprilcube.detector("config.json", {"fx": 800, "fy": 800, "cx": 320, "cy": 240})
+
+# 3x3 numpy camera matrix directly
+K = np.array([[800, 0, 320], [0, 800, 240], [0, 0, 1]], dtype=np.float64)
+det = aprilcube.detector("config.json", K)
+```
+
+### Direct class access
+
+```python
+from aprilcube import CubePoseEstimator, CubeConfig, KalmanFilterConfig
+from aprilcube.generate import TagPatternGenerator, CubeMeshBuilder, ThreeMFWriter
+```
+
+## CLI
+
+### Generate a cube
 
 ```bash
-# Generate a cube with 2x2 ArUco tags per face
-python generate_cube.py --grid 2x2x2 --dict 4x4_100 --tag-size 24 -o my_cube
-
-# Detect from webcam
-python detect_cube.py --cube my_cube/config.json --viz
-
-# Detect from an image
-python detect_cube.py --cube my_cube/config.json --image photo.jpg --viz
+aprilcube generate [options]
 ```
 
-## Generating Cubes
+Equivalent to the old `python generate_cube.py`. All arguments are the same:
 
+```bash
+# Simple cube, one tag per face
+aprilcube generate --grid 1x1x1 --dict 4x4_50 --tag-size 30
+
+# 2x2 cube with AprilTags
+aprilcube generate --grid 2x2x2 --dict apriltag_36h11 --tag-size 20
+
+# Flat calibration box
+aprilcube generate --grid 5x4x1 --dict 4x4_100 --tag-size 15 -o flat_box
+
+# Large cube with fine cell control
+aprilcube generate --grid 3x3x3 --dict 6x6_250 --cell-size 2.5 --margin-cell 2 --border-cell 2
 ```
-python generate_cube.py [options]
-```
-
-### Grid Format (`--grid WxHxD`)
-
-The grid specifies how many tags along each axis (X, Y, Z):
-
-| Grid | Shape | Faces |
-|------|-------|-------|
-| `1x1x1` | Cube | 1 tag per face, 6 total |
-| `2x2x2` | Cube | 4 tags per face, 24 total |
-| `5x4x1` | Flat box | 20 tags top/bottom, narrow side strips |
-| `1x1x3` | Tall pillar | 3 tags on tall sides, 1 on caps |
-
-A 2D shorthand `RxC` is also supported for backward compatibility (e.g., `2x3` expands to a cuboid).
 
 ### Options
 
@@ -65,13 +112,26 @@ A 2D shorthand `RxC` is also supported for backward compatibility (e.g., `2x3` e
 | `--extruder` | `1` | Bambu Studio extruder number |
 | `--invert` | — | Swap black/white |
 
-### Supported Dictionaries
+## Grid Format (`--grid WxHxD`)
+
+The grid specifies how many tags along each axis (X, Y, Z):
+
+| Grid | Shape | Faces |
+|------|-------|-------|
+| `1x1x1` | Cube | 1 tag per face, 6 total |
+| `2x2x2` | Cube | 4 tags per face, 24 total |
+| `5x4x1` | Flat box | 20 tags top/bottom, narrow side strips |
+| `1x1x3` | Tall pillar | 3 tags on tall sides, 1 on caps |
+
+A 2D shorthand `RxC` is also supported for backward compatibility (e.g., `2x3` expands to a cuboid).
+
+## Supported Dictionaries
 
 **ArUco:** `4x4_50`, `4x4_100`, `4x4_250`, `4x4_1000`, `5x5_*`, `6x6_*`, `7x7_*`, `aruco_original`
 
 **AprilTag:** `apriltag_16h5`, `apriltag_25h9`, `apriltag_36h10`, `apriltag_36h11`
 
-### Output
+## Output
 
 The output directory contains:
 
@@ -93,7 +153,7 @@ my_cube/
 {
   "dict": "4x4_100",
   "grid": "2x2x2",
-  "tag_ids": [0, 1, 2, ...],
+  "tag_ids": [0, 1, 2, "..."],
   "faces": {
     "+X": [0, 1, 2, 3],
     "-X": [4, 5, 6, 7],
@@ -114,104 +174,67 @@ my_cube/
 python -m mujoco.viewer --mjcf my_cube/mujoco/cube.xml
 ```
 
-The OBJ mesh + atlas texture are standard formats and can also be opened in Blender, MeshLab, etc. The coordinate frame matches `detect_cube.py`'s 6-DOF pose output (origin at cube center, units in meters).
+The OBJ mesh + atlas texture are standard formats and can also be opened in Blender, MeshLab, etc. The coordinate frame matches the detector's 6-DOF pose output (origin at cube center, units in meters).
 
-### Examples
+## How the Detector Works
 
-```bash
-# Simple cube, one tag per face
-python generate_cube.py --grid 1x1x1 --dict 4x4_50 --tag-size 30
+The detection pipeline runs per-frame and combines several techniques for robust, accurate 6-DOF pose estimation from 3D-printed fiducial cubes.
 
-# 2x2 cube with AprilTags
-python generate_cube.py --grid 2x2x2 --dict apriltag_36h11 --tag-size 20
+### 1. ArUco Detection (tuned for 3D-printed surfaces)
 
-# Flat calibration box
-python generate_cube.py --grid 5x4x1 --dict 4x4_100 --tag-size 15 -o flat_box
+The OpenCV ArUco detector is configured with parameters optimized for markers printed on FDM surfaces:
 
-# Large cube with fine cell control
-python generate_cube.py --grid 3x3x3 --dict 6x6_250 --cell-size 2.5 --margin-cell 2 --border-cell 2
+- **Sub-pixel corner refinement** (`CORNER_REFINE_SUBPIX`, win=5, 50 iterations, 0.01px accuracy) — critical for PnP accuracy since corner localization error directly propagates into pose error
+- **Wide adaptive thresholding** (window 3–53px, step 4) — handles the uneven surface texture and slight color bleeding typical of multi-material FDM prints
+- **Relaxed candidate filtering** (min perimeter 1%, max 400%, polygon approx 5%) — allows detection at oblique viewing angles where markers appear as thin parallelograms
+- **High-resolution bit sampling** (8 pixels/cell, 13% ignored margin) — improves bit decoding under perspective distortion from steep viewing angles
+
+### 2. Multi-Face PnP
+
+Unlike single-marker pose estimation (which suffers from the planar degeneracy problem), all detected tag corners across all visible faces are aggregated into a single PnP solve:
+
+- **>=6 points**: `solvePnPRansac` with the SQPNP solver, 200 iterations, 3px reprojection threshold, 99% confidence. SQPNP is a non-iterative solver that handles the general (non-planar) case efficiently.
+- **4-5 points**: Direct `solvePnP` with SQPNP (not enough points for RANSAC).
+- **Levenberg-Marquardt refinement** (`solvePnPRefineLM`) on the RANSAC inlier set for sub-pixel pose accuracy.
+
+Having tags on multiple faces of a known 3D geometry eliminates the planar ambiguity and provides 3D point spread, which dramatically improves pose stability compared to single-face detection.
+
+### 3. Error-State Kalman Filter
+
+For video/streaming mode, an error-state extended Kalman filter provides temporal smoothing and prediction:
+
+**Translation state** — standard linear KF with constant-velocity model:
+- State: `[x, y, z, vx, vy, vz]` (position + velocity in mm and mm/s)
+- Process noise: white-noise jerk model (`sigma_accel = 2000 mm/s²`)
+
+**Rotation state** — multiplicative error-state formulation on unit quaternions:
+- Nominal state: unit quaternion `q` (maintained separately, updated multiplicatively)
+- Error state: `[dθx, dθy, dθz, ωx, ωy, ωz]` (small-angle rotation error + angular velocity)
+- Process noise: `sigma_alpha = 30 rad/s²`
+- After each correction step, the error rotation is folded back into the nominal quaternion and reset to zero
+
+This avoids the singularities and normalization issues of filtering quaternions or Euler angles directly.
+
+**Adaptive measurement noise** — the measurement covariance `R` is scaled per-frame based on:
+- Reprojection error (higher error → less trust)
+- Number of detected tags (fewer tags → less trust)
+- Inlier ratio from RANSAC (lower ratio → less trust)
+
+**Mahalanobis gating** — innovation outlier rejection:
+- Soft gate (χ² > 16): inflate measurement noise 10× (down-weight but don't discard)
+- Hard gate (χ² > 100) or 3+ consecutive outliers: full state re-initialization
+
+**KF prediction** serves dual purpose:
+- Provides initial guess to PnP solver for faster convergence and disambiguation
+- Acts as fallback when detection fails (brief occlusion, motion blur), bridging gaps using the velocity model
+
+### Pipeline Summary
+
 ```
-
-## Detecting Pose
-
+Frame → Grayscale → ArUco detect → Filter to cube IDs → Identify visible faces
+  → Aggregate 2D-3D correspondences → PnP (with KF prediction as initial guess)
+  → LM refinement → Kalman update → Filtered 6-DOF pose
 ```
-python detect_cube.py --cube <config.json> [options]
-```
-
-Loads the cube config and detects markers from a camera, image, or video. Estimates the cube's 6-DOF pose using multi-face PnP.
-
-### Options
-
-| Arg | Default | Description |
-|-----|---------|-------------|
-| `--cube` | required | Path to `config.json` |
-| `--camera` | `0` | Camera index (default when no `--image`/`--video`) |
-| `--image` | — | Single image file |
-| `--video` | — | Video file |
-| `--calib` | — | Camera calibration JSON |
-| `--fx/--fy/--cx/--cy` | — | Direct intrinsic parameters |
-| `--no-filter` | — | Disable temporal smoothing |
-| `--viz` | — | Show debug visualization |
-
-### Camera Calibration
-
-Provide calibration via JSON file:
-
-```json
-{
-  "camera_matrix": [[fx, 0, cx], [0, fy, cy], [0, 0, 1]],
-  "dist_coeffs": [k1, k2, p1, p2, k3]
-}
-```
-
-Or directly via CLI:
-
-```bash
-python detect_cube.py --cube my_cube/config.json --fx 800 --fy 800 --cx 320 --cy 240 --viz
-```
-
-If no calibration is provided, a rough default is used (assumes ~60 deg FOV).
-
-### Examples
-
-```bash
-# Live webcam with visualization
-python detect_cube.py --cube my_cube/config.json --viz
-
-# Single image
-python detect_cube.py --cube my_cube/config.json --image photo.jpg --viz
-
-# Video with calibration
-python detect_cube.py --cube my_cube/config.json --video recording.mp4 --calib calib.json --viz
-
-# Specific camera index, no smoothing
-python detect_cube.py --cube my_cube/config.json --camera 1 --no-filter --viz
-```
-
-### How It Works
-
-1. **ArUco detection** with parameters tuned for 3D-printed surfaces (sub-pixel corner refinement, adaptive thresholding)
-2. **Multi-face PnP**: all detected tag corners across visible faces are aggregated into a single `solvePnPRansac` call with SQPNP solver (no planar degeneracy)
-3. **Levenberg-Marquardt refinement** on the inlier set
-4. **Temporal filtering** (EMA) for smooth tracking in video/camera mode
-
-## Printing
-
-Designed for dual-color FDM printing on Bambu Lab printers with AMS (Automatic Material System).
-
-### Supported Printers
-
-Any Bambu Lab printer with AMS or AMS Lite:
-
-- **Bambu X1 / X1C** — AMS (4 slots)
-- **Bambu P1S / P1P** — AMS Lite (4 slots)
-- **Bambu A1 / A1 mini** — AMS Lite (4 slots)
-
-### Setup
-
-1. Open `cube.3mf` in Bambu Studio
-2. Assign filament colors: extruder 1 = black, extruder 2 = white (PLA recommended)
-3. Slice and print — the 3MF uses `paint_color` attributes for automatic color assignment
 
 ## How Cube Size Is Calculated
 
@@ -231,6 +254,24 @@ For `--grid 2x2x2 --dict 4x4_100 --tag-size 24 --margin-cell 1 --border-cell 1`:
 ## Face Coordinate System
 
 Tags are assigned to faces in this order: +X, -X, +Y, -Y, +Z, -Z. Each face has a defined "right" and "down" direction (viewed from outside) such that `cross(right, down) = outward normal`, ensuring correct triangle winding.
+
+## Printing
+
+Designed for dual-color FDM printing on Bambu Lab printers with AMS (Automatic Material System).
+
+### Supported Printers
+
+Any Bambu Lab printer with AMS or AMS Lite:
+
+- **Bambu X1 / X1C** — AMS (4 slots)
+- **Bambu P1S / P1P** — AMS Lite (4 slots)
+- **Bambu A1 / A1 mini** — AMS Lite (4 slots)
+
+### Setup
+
+1. Open `cube.3mf` in Bambu Studio
+2. Assign filament colors: extruder 1 = black, extruder 2 = white (PLA recommended)
+3. Slice and print — the 3MF uses `paint_color` attributes for automatic color assignment
 
 ## License
 
