@@ -38,23 +38,32 @@ def detector(
     cube_cfg: Union[str, Path],
     intrinsic_cfg: Union[str, Path, dict, np.ndarray],
     *,
+    extrinsic: np.ndarray | None = None,
     enable_filter: bool = True,
     filter_config: KalmanFilterConfig | None = None,
     dist_coeffs: np.ndarray | None = None,
+    fast: bool = False,
 ) -> CubePoseEstimator:
     """Create a CubePoseEstimator from config file paths or inline parameters.
 
     Args:
         cube_cfg: Path to config.json produced by ``aprilcube generate``.
+            When a file path is given, its parent directory is used to locate
+            the 3D model (``mujoco/cube.obj``) for viser visualization.
         intrinsic_cfg: Camera intrinsics, one of:
             - str/Path to calibration JSON (keys: ``camera_matrix``, optional ``dist_coeffs``)
             - dict with keys ``fx``, ``fy``, ``cx``, ``cy`` (and optional ``dist_coeffs``)
             - 3x3 numpy camera matrix directly
+        extrinsic: Optional 4x4 world-to-camera transform (T_world_cam).
+            When set, ``world_pose()`` returns object pose in world frame.
         enable_filter: Whether to enable Kalman temporal smoothing (default True).
         filter_config: Custom KalmanFilterConfig, or None for defaults.
         dist_coeffs: Distortion coefficients override (5-element array).
             If intrinsic_cfg is a JSON file, dist_coeffs from that file are used
             unless this parameter explicitly overrides them.
+        fast: Use faster detector parameters suited for real-time webcam use.
+            Trades some accuracy for speed (fewer threshold passes, cheaper
+            corner refinement).
 
     Returns:
         A configured CubePoseEstimator ready to call ``process_frame(image)``.
@@ -66,12 +75,19 @@ def detector(
         det = aprilcube.detector("my_cube/config.json", "calib.json")
         result = det.process_frame(frame)
 
+        # With viser visualization
         det = aprilcube.detector(
             "my_cube/config.json",
             {"fx": 800, "fy": 800, "cx": 320, "cy": 240},
         )
+        server = det.build_viser(port=8080)
+        det.run_viser(server, camera=0)
     """
-    config, face_id_sets = load_cube_config(str(cube_cfg))
+    cube_path = Path(cube_cfg)
+    config, face_id_sets = load_cube_config(str(cube_path))
+
+    # Resolve model directory from config path
+    model_dir = str(cube_path.parent) if cube_path.is_file() else None
 
     camera_matrix, dc = _resolve_intrinsics(intrinsic_cfg)
     if dist_coeffs is not None:
@@ -84,6 +100,9 @@ def detector(
         dist_coeffs=dc,
         enable_filter=enable_filter,
         filter_config=filter_config,
+        fast=fast,
+        extrinsic=extrinsic,
+        model_dir=model_dir,
     )
 
 

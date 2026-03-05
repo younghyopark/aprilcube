@@ -116,34 +116,58 @@ def build_tag_corner_map(config: CubeConfig) -> dict[int, np.ndarray]:
 # ---------------------------------------------------------------------------
 # ArUco detector with tuned parameters
 # ---------------------------------------------------------------------------
-def create_detector(dict_id: int) -> cv2.aruco.ArucoDetector:
-    """Create an ArUco detector tuned for 3D-printed markers."""
+def create_detector(dict_id: int, fast: bool = False) -> cv2.aruco.ArucoDetector:
+    """Create an ArUco detector tuned for 3D-printed markers.
+
+    Args:
+        dict_id: ArUco dictionary ID.
+        fast: If True, use faster parameters better suited for real-time webcam use.
+    """
     dictionary = cv2.aruco.getPredefinedDictionary(dict_id)
     params = cv2.aruco.DetectorParameters()
 
-    # Sub-pixel corner refinement — critical for PnP accuracy
-    params.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX
-    params.cornerRefinementWinSize = 5
-    params.cornerRefinementMaxIterations = 50
-    params.cornerRefinementMinAccuracy = 0.01
+    if fast:
+        # Skip subpix refinement for speed (CONTOUR can crash on some frames)
+        params.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_NONE
 
-    # Adaptive thresholding — wider range for 3D-printed surface texture
-    params.adaptiveThreshWinSizeMin = 3
-    params.adaptiveThreshWinSizeMax = 53
-    params.adaptiveThreshWinSizeStep = 4
+        # Fewer threshold passes
+        params.adaptiveThreshWinSizeMin = 5
+        params.adaptiveThreshWinSizeMax = 41
+        params.adaptiveThreshWinSizeStep = 12
 
-    # Candidate filtering — relax for oblique views
-    params.minMarkerPerimeterRate = 0.01
-    params.maxMarkerPerimeterRate = 4.0
-    params.polygonalApproxAccuracyRate = 0.05
-    params.minCornerDistanceRate = 0.02
-    params.minDistanceToBorder = 1
+        # Tighter candidate filtering — reject tiny/huge quads early
+        params.minMarkerPerimeterRate = 0.03
+        params.maxMarkerPerimeterRate = 4.0
+        params.polygonalApproxAccuracyRate = 0.05
+        params.minCornerDistanceRate = 0.05
+        params.minDistanceToBorder = 2
 
-    # Bit decoding — higher sampling for oblique perspectives
-    params.perspectiveRemovePixelPerCell = 8
-    params.perspectiveRemoveIgnoredMarginPerCell = 0.13
+        params.perspectiveRemovePixelPerCell = 6
+        params.perspectiveRemoveIgnoredMarginPerCell = 0.13
+        params.errorCorrectionRate = 0.6
+    else:
+        # Sub-pixel corner refinement — critical for PnP accuracy
+        params.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX
+        params.cornerRefinementWinSize = 5
+        params.cornerRefinementMaxIterations = 50
+        params.cornerRefinementMinAccuracy = 0.01
 
-    params.errorCorrectionRate = 0.6
+        # Adaptive thresholding — wider range for 3D-printed surface texture
+        params.adaptiveThreshWinSizeMin = 3
+        params.adaptiveThreshWinSizeMax = 53
+        params.adaptiveThreshWinSizeStep = 4
+
+        # Candidate filtering — relax for oblique views
+        params.minMarkerPerimeterRate = 0.01
+        params.maxMarkerPerimeterRate = 4.0
+        params.polygonalApproxAccuracyRate = 0.05
+        params.minCornerDistanceRate = 0.02
+        params.minDistanceToBorder = 1
+
+        # Bit decoding — higher sampling for oblique perspectives
+        params.perspectiveRemovePixelPerCell = 8
+        params.perspectiveRemoveIgnoredMarginPerCell = 0.13
+        params.errorCorrectionRate = 0.6
 
     return cv2.aruco.ArucoDetector(dictionary, params)
 
@@ -362,7 +386,7 @@ class KalmanFilterConfig:
     init_sigma_omega: float = 5.0    # rad/s
 
     # Limits
-    max_predict_dt: float = 0.5      # seconds without measurement before reset
+    max_predict_dt: float = 0.1      # seconds without measurement before reset
 
     # History buffer
     history_size: int = 300          # ~10 s at 30 fps
@@ -645,15 +669,20 @@ class CubePoseEstimator:
     def __init__(self, config: CubeConfig, face_id_sets: dict[str, set[int]],
                  camera_matrix: np.ndarray, dist_coeffs: np.ndarray,
                  enable_filter: bool = True,
-                 filter_config: KalmanFilterConfig | None = None):
+                 filter_config: KalmanFilterConfig | None = None,
+                 fast: bool = False,
+                 extrinsic: np.ndarray | None = None,
+                 model_dir: str | None = None):
         self.config = config
         self.camera_matrix = camera_matrix
         self.dist_coeffs = dist_coeffs
+        self.extrinsic = np.asarray(extrinsic, dtype=np.float64) if extrinsic is not None else None
+        self.model_dir = model_dir
 
         self.tag_corner_map = build_tag_corner_map(config)
         self.valid_ids = set(self.tag_corner_map.keys())
         self.face_id_sets = face_id_sets
-        self.detector = create_detector(config.dict_id)
+        self.detector = create_detector(config.dict_id, fast=fast)
         self.pose_filter: KalmanPoseFilter | None = (
             KalmanPoseFilter(filter_config) if enable_filter else None
         )
@@ -674,6 +703,10 @@ class CubePoseEstimator:
             (0, 4), (1, 5), (2, 6), (3, 7),  # verticals
         ]
 
+        # Viser state (populated by build_viser)
+        self._viser_gui_image = None
+        self._viser_gui_status = None
+
     def _try_predict(self, timestamp: float, result: dict) -> dict:
         """Try KF prediction as fallback when detection/PnP fails."""
         if self.pose_filter and self.pose_filter.is_initialized:
@@ -684,8 +717,8 @@ class CubePoseEstimator:
                 result["rvec"] = rvec
                 result["tvec"] = tvec
                 result["predicted"] = True
-                self.prev_rvec = rvec.copy()
-                self.prev_tvec = tvec.copy()
+                # Don't update prev_rvec/tvec — keep last measured pose
+                # as PnP initial guess to avoid feedback from bad predictions.
                 return result
         # prediction unavailable — hard reset
         self.prev_rvec = None
@@ -749,13 +782,10 @@ class CubePoseEstimator:
         object_points = np.vstack(obj_pts).astype(np.float64)
         image_points = np.vstack(img_pts).astype(np.float64)
 
-        # Use KF prediction as PnP initial guess when available
+        # Use last measured pose as PnP initial guess (not KF prediction,
+        # which can drift and pull PnP to wrong solutions)
         pnp_rv_guess = self.prev_rvec
         pnp_tv_guess = self.prev_tvec
-        if self.pose_filter and self.pose_filter.is_initialized:
-            pred = self.pose_filter.predict(timestamp)
-            if pred is not None:
-                pnp_rv_guess, pnp_tv_guess = pred
 
         # Solve PnP
         success, rvec, tvec, reproj_err, inliers = estimate_pose(
@@ -766,6 +796,31 @@ class CubePoseEstimator:
 
         if not success or reproj_err > 5.0:
             return self._try_predict(timestamp, result)
+
+        # Reject flipped PnP solutions: verify that every detected face's
+        # outward normal points toward the camera (negative z in camera frame).
+        R_est, _ = cv2.Rodrigues(rvec)
+        for face_name in result["visible_faces"]:
+            for fd in FACE_DEFS:
+                if fd[0] == face_name:
+                    normal_obj = np.zeros(3)
+                    normal_obj[fd[1]] = fd[2]
+                    normal_cam = R_est @ normal_obj
+                    # Outward normal should face camera (z < 0 in camera frame)
+                    if normal_cam[2] > 0:
+                        return self._try_predict(timestamp, result)
+                    break
+
+        # Temporal consistency: reject sudden large jumps from previous pose.
+        if self.prev_rvec is not None:
+            dt = float(np.linalg.norm(tvec.flatten() - self.prev_tvec.flatten()))
+            R_prev, _ = cv2.Rodrigues(self.prev_rvec)
+            angle = np.arccos(np.clip((np.trace(R_prev.T @ R_est) - 1) / 2, -1, 1))
+            # Allow generous thresholds — only reject clearly wrong flips,
+            # not fast legitimate motion.
+            dist_to_cam = float(np.linalg.norm(tvec))
+            if dt > dist_to_cam * 0.5 or angle > np.radians(60):
+                return self._try_predict(timestamp, result)
 
         # Kalman filter update
         n_inlier_count = len(inliers) if inliers is not None else 0
@@ -791,11 +846,11 @@ class CubePoseEstimator:
         """Draw detected markers, axes, and wireframe."""
         vis = image.copy()
 
-        # Draw detected markers
+        # Draw detected marker outlines (no ID text)
         if result["detections"]:
-            corners = [d[1].reshape(1, 4, 2).astype(np.float32) for d in result["detections"]]
-            ids_arr = np.array([[d[0]] for d in result["detections"]])
-            cv2.aruco.drawDetectedMarkers(vis, corners, ids_arr)
+            for _, c2d in result["detections"]:
+                pts = c2d.astype(np.int32)
+                cv2.polylines(vis, [pts], True, (0, 255, 0), 2)
 
         if result["success"]:
             rvec, tvec = result["rvec"], result["tvec"]
@@ -833,6 +888,203 @@ class CubePoseEstimator:
                         0.6, (0, 255, 0), 2)
 
         return vis
+
+    def world_pose(self, result: dict) -> np.ndarray | None:
+        """Return 4x4 object-in-world transform from a process_frame result.
+
+        If extrinsic (T_world_cam) is set, returns T_world_cam @ T_cam_obj.
+        Otherwise returns T_cam_obj directly.
+        Returns None if result has no pose.
+        """
+        if not result.get("success"):
+            return None
+        T = np.eye(4)
+        T[:3, :3], _ = cv2.Rodrigues(result["rvec"])
+        T[:3, 3] = result["tvec"].flatten()
+        if self.extrinsic is not None:
+            T = self.extrinsic @ T
+        return T
+
+    # -- Viser integration --------------------------------------------------
+
+    def build_viser(self, port: int = 8080):
+        """Create a viser server with the cube scene pre-populated.
+
+        Adds world frame, camera frame (if extrinsic is set), ground grid,
+        textured mesh (from model_dir/mujoco/cube.obj if available), and
+        object axes. Returns the ``viser.ViserServer`` for further customization.
+
+        Requires ``pip install viser trimesh``.
+        """
+        import viser
+        import viser.transforms as vtf
+
+        server = viser.ViserServer(port=port)
+
+        # World frame
+        server.scene.add_frame(
+            "/world", axes_length=0.05, axes_radius=0.002, origin_radius=0.0,
+        )
+
+        # Camera frame
+        T_wc = self.extrinsic if self.extrinsic is not None else np.eye(4)
+        cam_wxyz = tuple(vtf.SO3.from_matrix(T_wc[:3, :3]).wxyz)
+        cam_pos = tuple(T_wc[:3, 3])
+        server.scene.add_frame(
+            "/camera", wxyz=cam_wxyz, position=cam_pos,
+            axes_length=0.04, axes_radius=0.002, origin_radius=0.0,
+        )
+
+        # Ground grid
+        grid_half = 0.3
+        grid_step = 0.05
+        grid_lines = []
+        n = int(grid_half / grid_step)
+        for i in range(-n, n + 1):
+            p = i * grid_step
+            grid_lines.append([[p, -grid_half, 0], [p, grid_half, 0]])
+            grid_lines.append([[-grid_half, p, 0], [grid_half, p, 0]])
+        server.scene.add_line_segments(
+            "/ground_grid",
+            points=np.array(grid_lines, dtype=np.float32),
+            colors=(80, 80, 80),
+            line_width=1.0,
+        )
+
+        # Textured mesh
+        if self.model_dir is not None:
+            from pathlib import Path
+            obj_path = Path(self.model_dir) / "mujoco" / "cube.obj"
+            if obj_path.exists():
+                import trimesh
+                mesh = trimesh.load(str(obj_path))
+                server.scene.add_mesh_trimesh("/object/mesh", mesh)
+
+        # Object axes
+        axis_len = float(max(self.config.box_dims)) / 1000.0 * 0.6
+        server.scene.add_frame(
+            "/object/axes", axes_length=axis_len, axes_radius=0.002,
+            origin_radius=0.0,
+        )
+
+        # GUI sidebar
+        server.gui.set_panel_label("AprilCube")
+        cam_folder = server.gui.add_folder("Camera Feed")
+        with cam_folder:
+            self._viser_gui_image = server.gui.add_image(
+                np.zeros((240, 320, 3), dtype=np.uint8),
+                label="Detection",
+                format="jpeg",
+                jpeg_quality=70,
+            )
+            self._viser_gui_status = server.gui.add_markdown(
+                "*Waiting for detection...*"
+            )
+
+        return server
+
+    def update_viser(self, server, result: dict, frame: np.ndarray,
+                     fps: float = 0.0) -> None:
+        """Push one frame's detection result to the viser scene and GUI.
+
+        Call this inside your own loop after ``process_frame``.
+        """
+        import viser.transforms as vtf
+
+        # Update object pose
+        T = self.world_pose(result)
+        if T is not None:
+            T_m = T.copy()
+            T_m[:3, 3] /= 1000.0  # mm -> meters
+            wxyz = tuple(vtf.SO3.from_matrix(T_m[:3, :3]).wxyz)
+            pos = tuple(T_m[:3, 3])
+            server.scene.add_frame(
+                "/object", wxyz=wxyz, position=pos,
+                axes_length=0.0, origin_radius=0.0,
+            )
+
+        # 2D overlay -> GUI sidebar
+        vis = self.draw_result(frame, result)
+        cv2.putText(vis, f"FPS: {fps:.0f}", (10, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+        vis_rgb = cv2.cvtColor(vis, cv2.COLOR_BGR2RGB)
+        if self._viser_gui_image is not None:
+            self._viser_gui_image.image = vis_rgb
+
+        # Status text
+        if self._viser_gui_status is not None:
+            if result["success"]:
+                t = result["tvec"].flatten()
+                faces = ", ".join(sorted(result["visible_faces"]))
+                self._viser_gui_status.content = (
+                    f"**Tags:** {result['n_tags']} | "
+                    f"**Faces:** {faces}\n\n"
+                    f"**Reproj:** {result['reproj_error']:.2f}px | "
+                    f"**FPS:** {fps:.0f}\n\n"
+                    f"**T:** [{t[0]:.1f}, {t[1]:.1f}, {t[2]:.1f}] mm"
+                )
+            else:
+                self._viser_gui_status.content = (
+                    f"*No detection* | **FPS:** {fps:.0f}"
+                )
+
+    def run_viser(self, server, camera: int = 0, width: int = 640) -> None:
+        """Blocking webcam capture loop that streams to the viser server.
+
+        Args:
+            server: ViserServer returned by ``build_viser()``.
+            camera: Camera device index.
+            width: Processing width in pixels.
+        """
+        cap = cv2.VideoCapture(camera)
+        if not cap.isOpened():
+            raise RuntimeError(f"Cannot open camera {camera}")
+
+        ret, frame = cap.read()
+        if not ret:
+            cap.release()
+            raise RuntimeError("Cannot read from camera")
+
+        raw_h, raw_w = frame.shape[:2]
+        scale = width / raw_w if raw_w > width else 1.0
+        proc_w = int(raw_w * scale)
+        proc_h = int(raw_h * scale)
+
+        # Resize the GUI image placeholder
+        if self._viser_gui_image is not None:
+            self._viser_gui_image.image = np.zeros(
+                (proc_h, proc_w, 3), dtype=np.uint8
+            )
+
+        fps_t = time.time()
+        fps_n = 0
+        fps = 0.0
+
+        try:
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+
+                if scale < 1.0:
+                    frame = cv2.resize(
+                        frame, (proc_w, proc_h),
+                        interpolation=cv2.INTER_LINEAR,
+                    )
+
+                result = self.process_frame(frame)
+
+                fps_n += 1
+                elapsed = time.time() - fps_t
+                if elapsed >= 1.0:
+                    fps = fps_n / elapsed
+                    fps_n = 0
+                    fps_t = time.time()
+
+                self.update_viser(server, result, frame, fps=fps)
+                time.sleep(0.001)
+        finally:
+            cap.release()
 
 
 # ---------------------------------------------------------------------------

@@ -132,6 +132,7 @@ def translation_error_pct(tvec_a: np.ndarray, tvec_b: np.ndarray) -> float:
 # ═══════════════════════════════════════════════════════════════════════════
 def build_face_textures(
     config: CubeConfig, pixels_per_cell: int = 20,
+    chamfer_radius: int = 0,
 ) -> dict[str, np.ndarray]:
     tag_gen = TagPatternGenerator(config.dict_id)
     patterns = [tag_gen.generate(tid) for tid in config.tag_ids]
@@ -146,13 +147,39 @@ def build_face_textures(
         )
         cur += n
         g = render_face_texture(grid, pixels_per_cell)
+        if chamfer_radius > 0:
+            g = apply_edge_rounding(g, chamfer_radius)
         textures[fd[0]] = cv2.cvtColor(g, cv2.COLOR_GRAY2BGR)
     return textures
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Image augmentations (occlusion, motion blur)
+# Image augmentations (edge rounding, occlusion, motion blur)
 # ═══════════════════════════════════════════════════════════════════════════
+def apply_edge_rounding(
+    texture: np.ndarray,
+    radius: int,
+) -> np.ndarray:
+    """Round corners of black/white cells via morphological open+close.
+
+    Simulates 3D-printed tags where sharp cell corners become rounded arcs.
+
+    Args:
+        texture: grayscale uint8 image (0=black, 255=white).
+        radius: radius of the circular structuring element in pixels.
+    """
+    if radius <= 0:
+        return texture
+    kernel = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE, (2 * radius + 1, 2 * radius + 1),
+    )
+    # Open rounds convex corners of white regions
+    # Close rounds convex corners of black regions
+    result = cv2.morphologyEx(texture, cv2.MORPH_OPEN, kernel)
+    result = cv2.morphologyEx(result, cv2.MORPH_CLOSE, kernel)
+    return result
+
+
 def apply_occlusion(
     image: np.ndarray,
     fraction: float,
@@ -822,6 +849,9 @@ def main():
                         help="Motion blur kernel size in px (default: 0, off)")
     parser.add_argument("--drop-rate", type=float, default=0.0,
                         help="Frame stall probability 0.0–1.0: repeats a frozen frame (default: 0, off)")
+    parser.add_argument("--chamfer", type=float, default=0.0,
+                        help="Edge rounding radius as fraction of cell size, "
+                             "e.g. 0.3 = 30%% (default: 0, off)")
     parser.add_argument("--drop-burst", type=int, default=1,
                         help="Max consecutive stale frames per stall event (default: 1)")
 
@@ -835,15 +865,18 @@ def main():
     print(f"Box: {bx:.1f} x {by:.1f} x {bz:.1f} mm, "
           f"{len(config.tag_ids)} tags ({config.dict_name})")
 
-    face_textures = build_face_textures(config, args.pixels_per_cell)
+    chamfer_px = int(round(args.chamfer * args.pixels_per_cell)) if args.chamfer > 0 else 0
+    face_textures = build_face_textures(config, args.pixels_per_cell, chamfer_px)
 
     W = H = args.resolution
     cam_matrix = build_camera(W, H)
     fx = cam_matrix[0, 0]
     print(f"Camera: {W}x{H}, fx=fy={fx:.0f}, "
           f"cx={cam_matrix[0, 2]:.0f}, cy={cam_matrix[1, 2]:.0f}")
-    if args.occlusion > 0 or args.blur > 0 or args.drop_rate > 0:
+    if chamfer_px > 0 or args.occlusion > 0 or args.blur > 0 or args.drop_rate > 0:
         parts = []
+        if chamfer_px > 0:
+            parts.append(f"chamfer={args.chamfer:.0%} ({chamfer_px}px)")
         if args.occlusion > 0:
             parts.append(f"occlusion={args.occlusion:.0%}")
         if args.blur > 0:
