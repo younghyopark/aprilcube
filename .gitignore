@@ -28,3 +28,5 @@ build/
 .claude/
 
 generate_models.sh
+
+models/*/stl
