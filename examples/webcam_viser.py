@@ -25,7 +25,7 @@ def main():
     parser = argparse.ArgumentParser(description="Webcam cube detection + viser 3D viz")
     parser.add_argument("--cube", required=True,
                         help="Path to config.json or model directory")
-    parser.add_argument("--camera", type=str, default="rs0_color", help="pycaas stream ID")
+    parser.add_argument("--camera", type=str, default="rs_242522070762_color", help="pycaas stream ID")
     parser.add_argument("--no-filter", action="store_true", help="Disable Kalman filter")
     parser.add_argument("--slow", action="store_true", help="Use accurate (slower) detector")
     parser.add_argument("--port", type=int, default=8080, help="Viser server port")
@@ -48,8 +48,17 @@ def main():
     ext[:3, :3] = ext_rot
     ext[:3, 3] = ext_trans
 
+    # save 4x4 extrinsic as a readable json 
+    with open("assets/extrinsic/extrinsic.json", "w") as f:
+        np.savetxt(f, ext, fmt="%.6f")
+
+    # example code to load this json 
+    # with open("assets/extrinsic/extrinsic.json", "r") as f:
+    #     ext_loaded = np.loadtxt(f)
+    #     print(ext_loaded)
+
     # Debug: check intrinsic/frame resolution match
-    K = client.get_intrinsics_matrix("rs0")
+    K = client.get_intrinsics_matrix("rs_242522070762")
     print(f"Frame resolution: {frame.shape[1]}x{frame.shape[0]}")
     print(f"Intrinsics: fx={K[0,0]:.1f} fy={K[1,1]:.1f} cx={K[0,2]:.1f} cy={K[1,2]:.1f}")
     print(f"Expected cx~{frame.shape[1]/2:.1f} cy~{frame.shape[0]/2:.1f}")
@@ -65,12 +74,6 @@ def main():
     # Viser auto-renders latest process_frame result in the background
     server = det.build_viser(port=args.port)
 
-    # Add Franka Panda robot at world origin
-    urdf = load_robot_description("panda_description")
-    viser_urdf = ViserUrdf(server, urdf_or_path=urdf, root_node_name="/world")
-    viser_urdf.update_cfg(np.zeros(len(viser_urdf.get_actuated_joint_limits())))
-
-    print(f"Viser running at http://localhost:{args.port}")
 
     # Capture loop — viser visualization updates automatically
     while True:
@@ -78,7 +81,9 @@ def main():
         if frame is None:
             break
 
-        det.process_frame(frame)
+        result = det.process_frame(frame)
+        # dict_keys(['success', 'rvec', 'tvec', 'reproj_error', 'n_tags', 'n_inliers', 'detections', 'tag_ids', 'visible_faces', 'predicted'])
+
         time.sleep(0.01)
 
 

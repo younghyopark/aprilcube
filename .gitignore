@@ -31,5 +31,8 @@ generate_models.sh
 
 models/*/stl
 
-assets/
+assets/extrinsic
 recording/
+
+debug/
+debugging/

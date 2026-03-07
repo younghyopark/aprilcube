@@ -1,5 +1,7 @@
 # aprilcube
 
+![](assets/video_2026-03-06_13-53-53.gif)
+
 Generate 3D-printable cubes/cuboids with ArUco or AprilTag fiducial markers on all 6 faces, then detect their 6-DOF pose from a camera.
 
 ## Overview
@@ -108,6 +110,30 @@ det = aprilcube.detector("my_cube", intrinsics, extrinsic=np.eye(4))
 result = det.process_frame(frame)
 T_world_obj = det.world_pose(result)  # 4x4 numpy array or None
 ```
+
+### Async (background detection)
+
+Run detection in a background thread so `get_latest()` never blocks your main loop:
+
+```python
+import cv2
+import aprilcube
+
+det = aprilcube.detector("models/my_cube", intrinsics, fast=True)
+det.start_async()
+
+cap = cv2.VideoCapture(0)
+while True:
+    ret, frame = cap.read()
+    det.submit_frame(frame)       # non-blocking, replaces any pending frame
+    result = det.get_latest()     # returns last completed result instantly
+    if result and result["success"]:
+        print(result["T"])         # 4x4 camera-frame pose matrix
+
+det.stop_async()
+```
+
+`submit_frame` uses a swap-not-queue design — if detection is slower than capture, intermediate frames are automatically skipped so the detector always works on the freshest frame.
 
 ### Direct class access
 

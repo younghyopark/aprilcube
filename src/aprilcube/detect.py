@@ -221,6 +221,38 @@ def _preprocess(gray: np.ndarray) -> np.ndarray:
     return _clahe.apply(gray)
 
 
+def _quad_quality(corners: np.ndarray, min_area: float = 100.0) -> float:
+    """Score a detected quad's geometric quality in [0, 1].
+
+    Checks area, convexity, and aspect ratio.  Returns 0.0 for degenerate
+    quads (too small, non-convex, extreme aspect ratio).
+    """
+    # corners: (4, 2)
+    area = cv2.contourArea(corners.astype(np.float32))
+    if area < min_area:
+        return 0.0
+
+    # Must be convex
+    if not cv2.isContourConvex(corners.astype(np.float32)):
+        return 0.0
+
+    # Side lengths
+    sides = np.array([
+        np.linalg.norm(corners[(i + 1) % 4] - corners[i]) for i in range(4)
+    ])
+    if sides.min() < 1e-3:
+        return 0.0
+
+    # Aspect ratio: ratio of shortest to longest side (1.0 = square)
+    aspect = sides.min() / sides.max()
+    if aspect < 0.15:          # very skewed quad — likely noise
+        return 0.0
+
+    # Score: blend of area confidence and aspect ratio
+    area_score = min(area / 400.0, 1.0)   # ramp up to 1.0 at 400 px²
+    return float(aspect * 0.5 + area_score * 0.5)
+
+
 # ---------------------------------------------------------------------------
 # Pose estimation
 # ---------------------------------------------------------------------------
@@ -855,6 +887,10 @@ class CubePoseEstimator:
                 result["success"] = True
                 result["rvec"] = rvec
                 result["tvec"] = tvec
+                T = np.eye(4)
+                T[:3, :3], _ = cv2.Rodrigues(rvec)
+                T[:3, 3] = tvec.flatten()
+                result["T"] = T
                 result["predicted"] = True
                 # Don't update prev_rvec/tvec — keep last measured pose
                 # as PnP initial guess to avoid feedback from bad predictions.
@@ -1027,6 +1063,7 @@ class CubePoseEstimator:
 
     def _store_latest(self, result: dict, frame: np.ndarray) -> dict:
         """Store the latest result/frame for the viser background thread."""
+        result["debug_viz"] = self.draw_result(frame, result)
         with self._latest_lock:
             self._latest_result = result
             self._latest_frame = frame
@@ -1053,7 +1090,7 @@ class CubePoseEstimator:
             timestamp = time.monotonic()
 
         result = {
-            "success": False, "rvec": None, "tvec": None,
+            "success": False, "rvec": None, "tvec": None, "T": None,
             "reproj_error": float("inf"), "n_tags": 0,
             "n_inliers": 0, "detections": [], "tag_ids": [],
             "visible_faces": set(), "predicted": False,
@@ -1091,6 +1128,15 @@ class CubePoseEstimator:
                     if tag_id in self.valid_ids and tag_id not in seen_ids:
                         detections.append((tag_id, fb_corners[i].reshape(4, 2)))
                         seen_ids.add(tag_id)
+
+        # Filter detections by quad geometric quality — removes false
+        # positives from noise, reflections, or texture that happen to
+        # decode as a valid tag ID.
+        detections = [
+            (tid, c2d) for tid, c2d in detections
+            if _quad_quality(c2d) > 0.15
+        ]
+        seen_ids = {tid for tid, _ in detections}
 
         # Recover rejected candidates using predicted pose geometry.
         # Rejected quads failed bit-decoding (e.g. from blur) but may still
@@ -1161,6 +1207,49 @@ class CubePoseEstimator:
             self.camera_matrix, self.dist_coeffs,
             pnp_rv_guess, pnp_tv_guess,
         )
+
+        # Per-tag reprojection outlier rejection: if a tag's mean corner
+        # reprojection error is much higher than the median, drop it and
+        # re-solve.  This catches false-positive detections that passed
+        # the quad-quality gate but don't match the cube geometry.
+        if success and not used_flow and len(detections) >= 3:
+            projected, _ = cv2.projectPoints(
+                object_points, rvec, tvec,
+                self.camera_matrix, self.dist_coeffs,
+            )
+            projected = projected.reshape(-1, 2)
+            # Compute per-tag mean reprojection error (4 corners each)
+            per_tag_err = []
+            for k in range(len(detections)):
+                s, e = k * 4, (k + 1) * 4
+                err = float(np.mean(np.linalg.norm(
+                    image_points[s:e] - projected[s:e], axis=1)))
+                per_tag_err.append(err)
+            median_err = float(np.median(per_tag_err))
+            # Keep tags whose error is within 3× the median (min 2 px)
+            tag_reproj_thresh = max(median_err * 3.0, 2.0)
+            keep = [i for i, e in enumerate(per_tag_err) if e <= tag_reproj_thresh]
+            if len(keep) < len(detections) and len(keep) >= 1:
+                detections = [detections[i] for i in keep]
+                result["detections"] = detections
+                result["n_tags"] = len(detections)
+                result["tag_ids"] = [d[0] for d in detections]
+                # Rebuild correspondences and re-solve
+                obj_pts = [self.tag_corner_map[tid] for tid, _ in detections]
+                img_pts = [c2d for _, c2d in detections]
+                object_points = np.vstack(obj_pts).astype(np.float64)
+                image_points = np.vstack(img_pts).astype(np.float64)
+                # Recompute visible faces
+                result["visible_faces"] = set()
+                for tag_id, _ in detections:
+                    for face_name, id_set in self.face_id_sets.items():
+                        if tag_id in id_set:
+                            result["visible_faces"].add(face_name)
+                success, rvec, tvec, reproj_err, inliers = estimate_pose(
+                    object_points, image_points,
+                    self.camera_matrix, self.dist_coeffs,
+                    pnp_rv_guess, pnp_tv_guess,
+                )
 
         # Flow-tracked points are noisier — allow looser reproj
         max_reproj = 3.0
@@ -1235,6 +1324,10 @@ class CubePoseEstimator:
         result["success"] = True
         result["rvec"] = rvec
         result["tvec"] = tvec
+        T = np.eye(4)
+        T[:3, :3], _ = cv2.Rodrigues(rvec)
+        T[:3, 3] = tvec.flatten()
+        result["T"] = T
         result["reproj_error"] = reproj_err
         result["n_inliers"] = n_inlier_count
         return self._store_latest(result, image)
@@ -1252,10 +1345,18 @@ class CubePoseEstimator:
         if result["success"]:
             rvec, tvec = result["rvec"], result["tvec"]
 
-            # Draw coordinate axes at cube center
+            # Draw coordinate axes at cube center (manual to avoid OpenCV warnings)
             axis_len = float(max(self.config.box_dims) / 2)
-            cv2.drawFrameAxes(vis, self.camera_matrix, self.dist_coeffs,
-                              rvec, tvec, axis_len, 3)
+            axes_3d = np.float64([
+                [0, 0, 0], [axis_len, 0, 0], [0, axis_len, 0], [0, 0, axis_len]
+            ])
+            pts2d, _ = cv2.projectPoints(axes_3d, rvec, tvec,
+                                         self.camera_matrix, self.dist_coeffs)
+            pts2d = pts2d.reshape(-1, 2).astype(int)
+            o = tuple(pts2d[0])
+            cv2.line(vis, o, tuple(pts2d[1]), (0, 0, 255), 3)
+            cv2.line(vis, o, tuple(pts2d[2]), (0, 255, 0), 3)
+            cv2.line(vis, o, tuple(pts2d[3]), (255, 0, 0), 3)
 
             # Draw box wireframe
             projected, _ = cv2.projectPoints(
@@ -1285,6 +1386,62 @@ class CubePoseEstimator:
                         0.6, (0, 255, 0), 2)
 
         return vis
+
+    # -- Async (background detection) -----------------------------------------
+
+    def start_async(self) -> None:
+        """Start background detection thread.
+
+        After calling this, use ``submit_frame()`` to feed frames and
+        ``get_latest()`` to retrieve the most recent detection result.
+        """
+        if getattr(self, "_async_running", False):
+            return
+        self._async_running = True
+        self._async_pending_frame: np.ndarray | None = None
+        self._async_pending_lock = threading.Lock()
+        self._async_pending_event = threading.Event()
+        self._async_thread = threading.Thread(
+            target=self._async_worker, daemon=True, name="aprilcube-async",
+        )
+        self._async_thread.start()
+
+    def stop_async(self) -> None:
+        """Stop the background detection thread."""
+        if not getattr(self, "_async_running", False):
+            return
+        self._async_running = False
+        self._async_pending_event.set()  # wake up worker so it can exit
+        self._async_thread.join(timeout=2.0)
+
+    def submit_frame(self, frame: np.ndarray) -> None:
+        """Submit a frame for background detection (non-blocking).
+
+        Always replaces any pending frame — if detection is slower than
+        capture, intermediate frames are dropped automatically.
+        """
+        with self._async_pending_lock:
+            self._async_pending_frame = frame
+        self._async_pending_event.set()
+
+    def get_latest(self) -> dict | None:
+        """Return the most recent detection result, or None if no result yet."""
+        with self._latest_lock:
+            return self._latest_result
+
+    def _async_worker(self) -> None:
+        """Background worker: process pending frames as fast as possible."""
+        while self._async_running:
+            self._async_pending_event.wait()
+            if not self._async_running:
+                break
+            self._async_pending_event.clear()
+            # Grab the latest submitted frame
+            with self._async_pending_lock:
+                frame = self._async_pending_frame
+                self._async_pending_frame = None
+            if frame is not None:
+                self.process_frame(frame)
 
     def world_pose(self, result: dict) -> np.ndarray | None:
         """Return 4x4 object-in-world transform from a process_frame result.
