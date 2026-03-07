@@ -1,6 +1,6 @@
 # aprilcube
 
-![](assets/video_2026-03-06_13-53-53.gif)
+![](assets/printing_process.gif)
 
 Generate 3D-printable cubes/cuboids with ArUco or AprilTag fiducial markers on all 6 faces, then detect their 6-DOF pose from a camera.
 
