@@ -19,7 +19,7 @@ The cube geometry is fully parameterized: grid layout, tag dictionary, tag size,
 pip install aprilcube
 ```
 
-Requires Python 3.10+ and installs `opencv-contrib-python` and `numpy`.
+Requires Python 3.10+ and installs `opencv-contrib-python`, `numpy`, and `pyyaml`.
 
 ## Python API
 
@@ -164,12 +164,65 @@ aprilcube generate --grid 5x4x1 --dict 4x4_100 --tag-size 15 -o flat_box
 
 # Large cube with fine cell control
 aprilcube generate --grid 3x3x3 --dict 6x6_250 --cell-size 2.5 --margin-cell 2 --border-cell 2
+
+# YAML spec, ready for future non-cube shapes
+aprilcube generate examples/cuboid_target.yaml
+
+# Voxel-cuboid T-shaped target
+aprilcube generate examples/t_shape_target.yaml
+```
+
+### YAML generation specs
+
+`aprilcube generate` can also read a YAML file. Supported shapes are `cuboid`, `voxel_cuboids`, and `voxel_grid`. Voxel targets place one marker on each exposed voxel face and write explicit marker corner coordinates into `config.json`.
+
+```yaml
+output: models/my_yaml_cube
+shape:
+  type: cuboid
+  grid: [2, 2, 1]
+dictionary: 4x4_50
+markers:
+  ids: 0-15
+size:
+  tag_size_mm: 24
+layout:
+  margin_cells: 1
+  border_cells: 1
+material:
+  extruder: 1
+  invert: false
+```
+
+A T-shaped target can be expressed as a union of axis-aligned voxel cuboids:
+
+```yaml
+output: models/t_shape_target
+shape:
+  type: voxel_cuboids
+  voxel_size_mm: 24
+  cuboids:
+    - name: stem
+      origin: [1, 0, 0]
+      size: [1, 1, 3]
+    - name: crossbar
+      origin: [0, 0, 2]
+      size: [3, 1, 1]
+dictionary: 4x4_50
+markers:
+  ids: 0-63
+size:
+  tag_size_mm: 18
+layout:
+  margin_cells: 1
+  border_cells: 1
 ```
 
 ### Options
 
 | Arg | Default | Description |
 |-----|---------|-------------|
+| `spec` / `-c, --config` | — | YAML generation spec |
 | `-g, --grid` | `1x1x1` | Tags per dimension: `WxHxD` |
 | `-d, --dict` | `4x4_50` | ArUco/AprilTag dictionary |
 | `-t, --ids` | auto | Tag IDs: range (`0-23`) or comma-separated |
@@ -341,6 +394,20 @@ Any Bambu Lab printer with AMS or AMS Lite:
 1. Open `cube.3mf` in Bambu Studio
 2. Assign filament colors: extruder 1 = black, extruder 2 = white (PLA recommended)
 3. Slice and print — the 3MF uses `paint_color` attributes for automatic color assignment
+
+## Citation
+
+If you use AprilCube in research, please cite the repository:
+
+```bibtex
+@misc{park2026aprilcube,
+  author       = {Park, Younghyo},
+  title        = {{AprilCube}: 3D-Printable Fiducial Cubes for Reliable 6-DoF Pose Estimation},
+  year         = {2026},
+  howpublished = {\url{https://github.com/younghyopark/aprilcube}},
+  note         = {Software repository, version 0.1.0}
+}
+```
 
 ## License
 

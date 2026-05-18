@@ -1,0 +1,15 @@
+output: yaml_cube
+shape:
+  type: cuboid
+  grid: [2, 2, 1]
+dictionary: 4x4_50
+markers:
+  ids: 0-15
+size:
+  tag_size_mm: 24
+layout:
+  margin_cells: 1
+  border_cells: 1
+material:
+  extruder: 1
+  invert: false

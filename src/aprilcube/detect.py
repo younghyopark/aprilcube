@@ -31,6 +31,19 @@ def load_cube_config(path: str) -> tuple[CubeConfig, dict[str, set[int]]]:
     from aprilcube.generate import parse_grid
     gx, gy, gz = parse_grid(data["grid"])
     dict_id = DICT_MAP[data["dict"]]
+    marker_corners = None
+    marker_normals = None
+    target_type = data.get("target", {}).get("type", "cuboid")
+    if "markers" in data:
+        marker_corners = {
+            int(m["id"]): m.get("corners_mm", m.get("corners"))
+            for m in data["markers"]
+        }
+        marker_normals = {
+            int(m["id"]): m.get("normal")
+            for m in data["markers"]
+            if m.get("normal") is not None
+        }
 
     config = CubeConfig(
         grid_x=gx, grid_y=gy, grid_z=gz,
@@ -40,10 +53,22 @@ def load_cube_config(path: str) -> tuple[CubeConfig, dict[str, set[int]]]:
         margin_cells=data["margin_cells"],
         border_cells=data["border_cells"],
         cell_size_mm=data["cell_size_mm"],
+        target_type=target_type,
+        marker_corners=marker_corners,
+        marker_normals=marker_normals,
     )
     config.compute()
+    if "box_dims" in data:
+        config.box_dims = tuple(data["box_dims"])
+    if "marker_pixels" in data:
+        config.marker_pixels = int(data["marker_pixels"])
 
-    face_id_sets = {name: set(ids) for name, ids in data["faces"].items()}
+    if "faces" in data:
+        face_id_sets = {name: set(ids) for name, ids in data["faces"].items()}
+    else:
+        face_id_sets: dict[str, set[int]] = {}
+        for marker in data.get("markers", []):
+            face_id_sets.setdefault(marker.get("face", "marker"), set()).add(int(marker["id"]))
     return config, face_id_sets
 
 
@@ -56,6 +81,12 @@ def build_tag_corner_map(config: CubeConfig) -> dict[int, np.ndarray]:
     Corners are ordered [TL, TR, BR, BL] as seen from outside the face,
     matching cv2.aruco.detectMarkers() corner ordering.
     """
+    if config.marker_corners is not None:
+        return {
+            int(tag_id): np.asarray(corners, dtype=np.float64)
+            for tag_id, corners in config.marker_corners.items()
+        }
+
     tag_corner_map: dict[int, np.ndarray] = {}
     id_cursor = 0
     mp = config.marker_pixels
