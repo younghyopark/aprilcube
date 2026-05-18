@@ -1,0 +1,31 @@
+output: models/zigzag_snake_target
+shape:
+  type: voxel_cuboids
+  voxel_size_mm: 24
+  cuboids:
+    - name: front_run
+      origin: [0, 0, 0]
+      size: [3, 1, 1]
+    - name: right_turn
+      origin: [2, 1, 0]
+      size: [1, 1, 1]
+    - name: middle_run
+      origin: [0, 2, 0]
+      size: [3, 1, 1]
+    - name: left_turn
+      origin: [0, 3, 0]
+      size: [1, 1, 1]
+    - name: back_run
+      origin: [0, 4, 0]
+      size: [3, 1, 1]
+dictionary: 4x4_50
+markers:
+  ids: 0-49
+size:
+  tag_size_mm: 18
+layout:
+  margin_cells: 1
+  border_cells: 1
+material:
+  extruder: 1
+  invert: false

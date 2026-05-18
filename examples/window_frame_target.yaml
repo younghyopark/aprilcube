@@ -1,0 +1,28 @@
+output: models/window_frame_target
+shape:
+  type: voxel_cuboids
+  voxel_size_mm: 24
+  cuboids:
+    - name: left_post
+      origin: [0, 0, 0]
+      size: [1, 1, 4]
+    - name: right_post
+      origin: [3, 0, 0]
+      size: [1, 1, 4]
+    - name: bottom_rail
+      origin: [0, 0, 0]
+      size: [4, 1, 1]
+    - name: top_rail
+      origin: [0, 0, 3]
+      size: [4, 1, 1]
+dictionary: 4x4_50
+markers:
+  ids: 0-49
+size:
+  tag_size_mm: 18
+layout:
+  margin_cells: 1
+  border_cells: 1
+material:
+  extruder: 1
+  invert: false

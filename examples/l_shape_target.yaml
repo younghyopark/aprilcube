@@ -1,0 +1,22 @@
+output: models/l_shape_target
+shape:
+  type: voxel_cuboids
+  voxel_size_mm: 24
+  cuboids:
+    - name: vertical_leg
+      origin: [0, 0, 0]
+      size: [1, 1, 3]
+    - name: horizontal_foot
+      origin: [0, 0, 0]
+      size: [3, 1, 1]
+dictionary: 4x4_50
+markers:
+  ids: 0-49
+size:
+  tag_size_mm: 18
+layout:
+  margin_cells: 1
+  border_cells: 1
+material:
+  extruder: 1
+  invert: false
