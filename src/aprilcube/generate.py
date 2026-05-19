@@ -1581,8 +1581,10 @@ def _render_voxel_view(
     azim_deg: float,
     view_w: int = 420,
     view_h: int = 420,
+    show_ids: bool = True,
+    background_color: int = 240,
 ) -> np.ndarray:
-    bg = np.full((view_h, view_w, 3), 240, dtype=np.uint8)
+    bg = np.full((view_h, view_w, 3), background_color, dtype=np.uint8)
     diag = np.sqrt(sum(d ** 2 for d in box_dims))
     fx = fy = view_w * 1.8
     cam_matrix = np.array([[fx, 0, view_w / 2],
@@ -1615,23 +1617,24 @@ def _render_voxel_view(
         mask = cv2.warpPerspective(np.full((th, tw), 255, dtype=np.uint8), M, (view_w, view_h), borderMode=cv2.BORDER_CONSTANT, borderValue=0)
         bg = np.where(mask[:, :, np.newaxis] > 0, warped, bg)
 
-        center_3d = np.array(face["corners_mm"], dtype=np.float64).mean(axis=0)
-        label_3d = center_3d + np.array(face["normal"], dtype=np.float64) * (max(box_dims) * 0.08)
-        label_pts, _ = cv2.projectPoints(np.array([center_3d, label_3d]), rvec, tvec, cam_matrix, dist_coeffs)
-        p = label_pts.reshape(-1, 2).astype(int)
-        cv2.line(bg, tuple(p[0]), tuple(p[1]), (80, 80, 80), 1, cv2.LINE_AA)
-        cv2.circle(bg, tuple(p[0]), 2, (80, 80, 80), cv2.FILLED)
-        label = str(face["id"])
-        font = cv2.FONT_HERSHEY_DUPLEX
-        scale = 0.5
-        thick = 1
-        (tw_text, th_text), _ = cv2.getTextSize(label, font, scale, thick)
-        lx, ly = p[1]
-        cv2.rectangle(bg, (lx - tw_text // 2 - 3, ly - th_text // 2 - 3),
-                      (lx + tw_text // 2 + 3, ly + th_text // 2 + 3), (255, 255, 255), cv2.FILLED)
-        cv2.rectangle(bg, (lx - tw_text // 2 - 3, ly - th_text // 2 - 3),
-                      (lx + tw_text // 2 + 3, ly + th_text // 2 + 3), (80, 80, 80), 1)
-        cv2.putText(bg, label, (lx - tw_text // 2, ly + th_text // 2), font, scale, (0, 0, 0), thick, cv2.LINE_AA)
+        if show_ids:
+            center_3d = np.array(face["corners_mm"], dtype=np.float64).mean(axis=0)
+            label_3d = center_3d + np.array(face["normal"], dtype=np.float64) * (max(box_dims) * 0.08)
+            label_pts, _ = cv2.projectPoints(np.array([center_3d, label_3d]), rvec, tvec, cam_matrix, dist_coeffs)
+            p = label_pts.reshape(-1, 2).astype(int)
+            cv2.line(bg, tuple(p[0]), tuple(p[1]), (80, 80, 80), 1, cv2.LINE_AA)
+            cv2.circle(bg, tuple(p[0]), 2, (80, 80, 80), cv2.FILLED)
+            label = str(face["id"])
+            font = cv2.FONT_HERSHEY_DUPLEX
+            scale = 0.5
+            thick = 1
+            (tw_text, th_text), _ = cv2.getTextSize(label, font, scale, thick)
+            lx, ly = p[1]
+            cv2.rectangle(bg, (lx - tw_text // 2 - 3, ly - th_text // 2 - 3),
+                          (lx + tw_text // 2 + 3, ly + th_text // 2 + 3), (255, 255, 255), cv2.FILLED)
+            cv2.rectangle(bg, (lx - tw_text // 2 - 3, ly - th_text // 2 - 3),
+                          (lx + tw_text // 2 + 3, ly + th_text // 2 + 3), (80, 80, 80), 1)
+            cv2.putText(bg, label, (lx - tw_text // 2, ly + th_text // 2), font, scale, (0, 0, 0), thick, cv2.LINE_AA)
 
     return bg
 

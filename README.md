@@ -2,16 +2,16 @@
 
 ![](assets/printing_process.gif)
 
-Generate 3D-printable cubes/cuboids with ArUco or AprilTag fiducial markers on all 6 faces, then detect their 6-DOF pose from a camera.
+Generate 3D-printable fiducial targets with ArUco or AprilTag markers, then detect their 6-DOF pose from a camera. Targets can be simple cubes/cuboids or richer voxel-composed shapes such as T-shapes, chairs, frames, and stair-step objects.
 
 ## Overview
 
 **aprilcube** is a two-part pipeline:
 
-1. **Generator** — Creates a multi-color 3MF file with markers on every face, ready for dual-color 3D printing (Bambu Studio / AMS)
-2. **Detector** — Detects the cube in a camera image and estimates its full 6-DOF pose (rotation + translation)
+1. **Generator** — Creates a multi-color 3MF file with markers on the target surface, ready for dual-color 3D printing (Bambu Studio / AMS)
+2. **Detector** — Detects the target in a camera image and estimates its full 6-DOF pose (rotation + translation)
 
-The cube geometry is fully parameterized: grid layout, tag dictionary, tag size, margins, borders. Both modules share the same config, so the detector knows the exact 3D position of every tag corner.
+Cuboid targets are parameterized by grid layout, tag dictionary, tag size, margins, and borders. Voxel targets are specified as unions of axis-aligned voxel cuboids; the generator places one marker on each exposed voxel face and writes exact 3D corner coordinates into `config.json`. Both modules share the same config, so the detector knows the precise 3D position of every tag corner even when the target is not a box.
 
 ## Installation
 
@@ -27,7 +27,7 @@ Requires Python 3.10+ and installs `opencv-contrib-python`, `numpy`, and `pyyaml
 import aprilcube
 
 # Create a detector from config.json and camera intrinsics
-det = aprilcube.detector("my_cube/config.json", {"fx": 800, "fy": 800, "cx": 320, "cy": 240})
+det = aprilcube.detector("my_target/config.json", {"fx": 800, "fy": 800, "cx": 320, "cy": 240})
 
 # Process a frame (BGR numpy array)
 result = det.process_frame(frame)
@@ -41,11 +41,11 @@ if result["success"]:
 
 ### `aprilcube.detector(cube_cfg, intrinsic_cfg, **kwargs)`
 
-Creates a `CubePoseEstimator` ready to process frames.
+Creates a `CubePoseEstimator` ready to process frames. The class name is kept for API compatibility, but configs may describe either cuboid or voxel-composed targets.
 
 | Arg | Type | Description |
 |-----|------|-------------|
-| `cube_cfg` | `str \| Path` | Path to `config.json` or model directory |
+| `cube_cfg` | `str \| Path` | Path to `config.json` or generated model directory |
 | `intrinsic_cfg` | `str \| Path \| dict \| np.ndarray` | Camera intrinsics (see below) |
 | `extrinsic` | `np.ndarray \| None` | 4x4 world-to-camera transform (default: `None`) |
 | `enable_filter` | `bool` | Enable Kalman temporal smoothing (default: `True`) |
@@ -80,7 +80,7 @@ import cv2
 import aprilcube
 
 det = aprilcube.detector(
-    "models/my_cube",  # directory or config.json path
+    "models/my_target",  # directory or config.json path
     {"fx": 800, "fy": 800, "cx": 320, "cy": 240},
     fast=True,
 )
@@ -97,7 +97,7 @@ while True:
     det.process_frame(frame)
 ```
 
-The scene includes world/camera/object coordinate frames, a ground grid, and the textured cube mesh (loaded from `mujoco/cube.obj` in the model directory). The returned `ViserServer` can be customized — add objects to `server.scene` before or after starting the loop.
+The scene includes world/camera/object coordinate frames, a ground grid, and the textured target mesh (loaded from `mujoco/cube.obj` in the model directory). The returned `ViserServer` can be customized — add objects to `server.scene` before or after starting the loop.
 
 ### World-frame poses
 
@@ -106,7 +106,7 @@ Pass `extrinsic` (a 4x4 T_world_cam matrix) to get object poses in world frame:
 ```python
 import numpy as np
 
-det = aprilcube.detector("my_cube", intrinsics, extrinsic=np.eye(4))
+det = aprilcube.detector("my_target", intrinsics, extrinsic=np.eye(4))
 result = det.process_frame(frame)
 T_world_obj = det.world_pose(result)  # 4x4 numpy array or None
 ```
@@ -119,7 +119,7 @@ Run detection in a background thread so `get_latest()` never blocks your main lo
 import cv2
 import aprilcube
 
-det = aprilcube.detector("models/my_cube", intrinsics, fast=True)
+det = aprilcube.detector("models/my_target", intrinsics, fast=True)
 det.start_async()
 
 cap = cv2.VideoCapture(0)
@@ -144,13 +144,13 @@ from aprilcube.generate import TagPatternGenerator, CubeMeshBuilder, ThreeMFWrit
 
 ## CLI
 
-### Generate a cube
+### Generate Targets
 
 ```bash
 aprilcube generate [options]
 ```
 
-Equivalent to the old `python generate_cube.py`. All arguments are the same:
+The CLI can generate classic cuboids from flags or arbitrary voxel-composed targets from YAML specs:
 
 ```bash
 # Simple cube, one tag per face
@@ -165,11 +165,14 @@ aprilcube generate --grid 5x4x1 --dict 4x4_100 --tag-size 15 -o flat_box
 # Large cube with fine cell control
 aprilcube generate --grid 3x3x3 --dict 6x6_250 --cell-size 2.5 --margin-cell 2 --border-cell 2
 
-# YAML spec, ready for future non-cube shapes
+# YAML cuboid spec
 aprilcube generate examples/cuboid_target.yaml
 
 # Voxel-cuboid T-shaped target
 aprilcube generate examples/t_shape_target.yaml
+
+# Higher-ID-count voxel target
+aprilcube generate examples/chair_target.yaml
 ```
 
 ### YAML generation specs
@@ -218,6 +221,20 @@ layout:
   border_cells: 1
 ```
 
+The repository includes several ready-to-generate voxel examples:
+
+| Spec | Model directory | Dictionary | Markers | Shape idea |
+|------|-----------------|------------|---------|------------|
+| `examples/t_shape_target.yaml` | `models/t_shape_target` | `4x4_50` | 22 | T-shaped target |
+| `examples/l_shape_target.yaml` | `models/l_shape_target` | `4x4_50` | 22 | L/corner target |
+| `examples/stair_step_target.yaml` | `models/stair_step_target` | `4x4_50` | 24 | stepped target |
+| `examples/u_shape_target.yaml` | `models/u_shape_target` | `4x4_50` | 30 | U-shaped target |
+| `examples/plus_shape_target.yaml` | `models/plus_shape_target` | `4x4_50` | 30 | 3D plus target |
+| `examples/spiral_tower_target.yaml` | `models/spiral_tower_target` | `4x4_50` | 34 | rising spiral tower |
+| `examples/zigzag_snake_target.yaml` | `models/zigzag_snake_target` | `4x4_50` | 46 | flat serpentine target |
+| `examples/window_frame_target.yaml` | `models/window_frame_target` | `4x4_50` | 48 | frame with open center |
+| `examples/chair_target.yaml` | `models/chair_target` | `4x4_100` | 78 | chair with four legs and backrest |
+
 ### Options
 
 | Arg | Default | Description |
@@ -234,9 +251,9 @@ layout:
 | `--extruder` | `1` | Bambu Studio extruder number |
 | `--invert` | — | Swap black/white |
 
-## Grid Format (`--grid WxHxD`)
+## Cuboid Grid Format (`--grid WxHxD`)
 
-The grid specifies how many tags along each axis (X, Y, Z):
+For cuboid targets, the grid specifies how many tags along each axis (X, Y, Z):
 
 | Grid | Shape | Faces |
 |------|-------|-------|
@@ -246,6 +263,8 @@ The grid specifies how many tags along each axis (X, Y, Z):
 | `1x1x3` | Tall pillar | 3 tags on tall sides, 1 on caps |
 
 A 2D shorthand `RxC` is also supported for backward compatibility (e.g., `2x3` expands to a cuboid).
+
+For voxel targets, `grid` is inferred from the occupied voxel extent and each exposed voxel face gets one marker. The generated `config.json` contains a `markers` list with `id`, `face`, `voxel`, `normal`, `corners_mm`, and `face_corners_mm` for every marker.
 
 ## Supported Dictionaries
 
@@ -258,7 +277,7 @@ A 2D shorthand `RxC` is also supported for backward compatibility (e.g., `2x3` e
 The output directory contains:
 
 ```
-my_cube/
+my_target/
   cube.3mf              # Multi-color 3MF for Bambu Studio (paint_color attribute)
   config.json           # All parameters needed by the detector
   thumbnail.png         # 6-view preview with dimensions, tag IDs, and axis indicators
@@ -266,7 +285,7 @@ my_cube/
     cube.xml            # MuJoCo MJCF model (references cube.obj + cube_atlas.png)
     cube.obj            # Wavefront OBJ mesh with UV coordinates
     cube.mtl            # Material file referencing the atlas texture
-    cube_atlas.png      # Texture atlas (3×2 grid of all 6 face textures)
+    cube_atlas.png      # Texture atlas for MuJoCo/OBJ visualization
 ```
 
 **`config.json`** example:
@@ -290,17 +309,38 @@ my_cube/
 }
 ```
 
+Voxel-target configs additionally include explicit marker geometry:
+
+```json
+{
+  "target": {
+    "type": "voxel_cuboids",
+    "voxel_size_mm": 24.0,
+    "occupied_voxels": 5
+  },
+  "markers": [
+    {
+      "id": 0,
+      "face": "-X",
+      "voxel": [0, 0, 2],
+      "normal": [-1.0, 0.0, 0.0],
+      "corners_mm": [[-36.0, 9.0, 33.0], "..."]
+    }
+  ]
+}
+```
+
 **`mujoco/cube.xml`** can be loaded directly in MuJoCo for simulation:
 
 ```bash
-python -m mujoco.viewer --mjcf my_cube/mujoco/cube.xml
+python -m mujoco.viewer --mjcf my_target/mujoco/cube.xml
 ```
 
-The OBJ mesh + atlas texture are standard formats and can also be opened in Blender, MeshLab, etc. The coordinate frame matches the detector's 6-DOF pose output (origin at cube center, units in meters).
+The OBJ mesh + atlas texture are standard formats and can also be opened in Blender, MeshLab, etc. The coordinate frame matches the detector's 6-DOF pose output (origin at target bounding-box center, units in meters).
 
 ## How the Detector Works
 
-The detection pipeline runs per-frame and combines several techniques for robust, accurate 6-DOF pose estimation from 3D-printed fiducial cubes.
+The detection pipeline runs per-frame and combines several techniques for robust, accurate 6-DOF pose estimation from 3D-printed fiducial targets.
 
 ### 1. ArUco Detection (tuned for 3D-printed surfaces)
 
@@ -311,7 +351,7 @@ The OpenCV ArUco detector is configured with parameters optimized for markers pr
 - **Relaxed candidate filtering** (min perimeter 1%, max 400%, polygon approx 5%) — allows detection at oblique viewing angles where markers appear as thin parallelograms
 - **High-resolution bit sampling** (8 pixels/cell, 13% ignored margin) — improves bit decoding under perspective distortion from steep viewing angles
 
-### 2. Multi-Face PnP
+### 2. Multi-Marker PnP
 
 Unlike single-marker pose estimation (which suffers from the planar degeneracy problem), all detected tag corners across all visible faces are aggregated into a single PnP solve:
 
@@ -319,7 +359,7 @@ Unlike single-marker pose estimation (which suffers from the planar degeneracy p
 - **4-5 points**: Direct `solvePnP` with SQPNP (not enough points for RANSAC).
 - **Levenberg-Marquardt refinement** (`solvePnPRefineLM`) on the RANSAC inlier set for sub-pixel pose accuracy.
 
-Having tags on multiple faces of a known 3D geometry eliminates the planar ambiguity and provides 3D point spread, which dramatically improves pose stability compared to single-face detection.
+Having tags on multiple faces of a known 3D geometry eliminates the planar ambiguity and provides 3D point spread, which dramatically improves pose stability compared to single-face detection. For voxel targets, the PnP map comes directly from the explicit `markers[*].corners_mm` records rather than from cuboid grid assumptions.
 
 ### 3. Error-State Kalman Filter
 
@@ -353,14 +393,14 @@ This avoids the singularities and normalization issues of filtering quaternions 
 ### Pipeline Summary
 
 ```
-Frame → Grayscale → ArUco detect → Filter to cube IDs → Identify visible faces
+Frame → Grayscale → ArUco detect → Filter to target IDs → Identify visible faces
   → Aggregate 2D-3D correspondences → PnP (with KF prediction as initial guess)
   → LM refinement → Kalman update → Filtered 6-DOF pose
 ```
 
-## How Cube Size Is Calculated
+## How Target Size Is Calculated
 
-All dimensions are quantized to cell_size:
+For cuboids, all dimensions are quantized to `cell_size`:
 
 ```
 cell_size = tag_size / marker_pixels
@@ -373,9 +413,20 @@ For `--grid 2x2x2 --dict 4x4_100 --tag-size 24 --margin-cell 1 --border-cell 1`:
 - `axis_cells = 2*1 + 2*6 + 1*1 = 15`
 - `box = 15 * 4 = 60 mm` per axis → 60 x 60 x 60 mm cube
 
+For voxel targets:
+
+```
+face_cells = voxel_size / cell_size
+box_dims = occupied_voxel_extent * voxel_size
+```
+
+Each exposed voxel face receives one centered marker. For `voxel_size_mm: 24` and `tag_size_mm: 18` with a 4x4 dictionary, `marker_pixels = 6`, so `cell_size = 3 mm` and each voxel face is an 8x8 cell grid: 1-cell border, 6-cell marker, 1-cell border.
+
 ## Face Coordinate System
 
-Tags are assigned to faces in this order: +X, -X, +Y, -Y, +Z, -Z. Each face has a defined "right" and "down" direction (viewed from outside) such that `cross(right, down) = outward normal`, ensuring correct triangle winding.
+Cuboid tags are assigned to faces in this order: +X, -X, +Y, -Y, +Z, -Z. Each face has a defined "right" and "down" direction (viewed from outside) such that `cross(right, down) = outward normal`, ensuring correct triangle winding.
+
+Voxel target markers use the same face coordinate convention, but each marker is tied to a specific exposed voxel face in the `markers` list.
 
 ## Printing
 
@@ -392,7 +443,7 @@ Any Bambu Lab printer with AMS or AMS Lite:
 ### Setup
 
 1. Open `cube.3mf` in Bambu Studio
-2. Assign filament colors: extruder 1 = black, extruder 2 = white (PLA recommended)
+2. Use filament colors: extruder 1 = black, extruder 2 = white (PLA recommended)
 3. Slice and print — the 3MF uses `paint_color` attributes for automatic color assignment
 
 ## Citation
@@ -402,10 +453,10 @@ If you use AprilCube in research, please cite the repository:
 ```bibtex
 @misc{park2026aprilcube,
   author       = {Park, Younghyo},
-  title        = {{AprilCube}: 3D-Printable Fiducial Cubes for Reliable 6-DoF Pose Estimation},
+  title        = {{AprilCube}: 3D-Printable Fiducial Targets for Reliable 6-DoF Pose Estimation},
   year         = {2026},
   howpublished = {\url{https://github.com/younghyopark/aprilcube}},
-  note         = {Software repository, version 0.1.0}
+  note         = {Software repository, version 0.2.0}
 }
 ```
 

@@ -9,6 +9,7 @@ def main():
         print("Commands:")
         print("  generate    Generate a 3MF cube with ArUco/AprilTag markers")
         print("  viz         Web-based real-time detection viewer")
+        print("  web         Open the standalone voxel target designer")
         print("\nRun 'aprilcube <command> --help' for command-specific help.")
         sys.exit(0)
 
@@ -26,9 +27,12 @@ def main():
     elif command == "viz":
         from aprilcube.viz import main as viz_main
         viz_main()
+    elif command == "web":
+        from aprilcube.web.app import main as web_main
+        web_main()
     else:
         print(f"Unknown command: {command}", file=sys.stderr)
-        print("Available commands: generate, viz", file=sys.stderr)
+        print("Available commands: generate, viz, web", file=sys.stderr)
         sys.exit(1)
 
 

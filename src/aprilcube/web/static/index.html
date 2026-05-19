@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>AprilCube Voxel Designer</title>
+    <link rel="stylesheet" href="./styles.css">
+    <script src="https://unpkg.com/three@0.128.0/build/three.min.js"></script>
+    <script src="https://unpkg.com/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+    <script src="./marker-data.js"></script>
+  </head>
+  <body>
+    <main class="app-shell">
+      <aside class="control-panel" aria-label="Target controls">
+        <div class="brand-row">
+          <div>
+            <h1>AprilCube</h1>
+            <p>Voxel target designer</p>
+          </div>
+          <span class="pill" id="connection-state">Static</span>
+        </div>
+
+        <section class="panel-section">
+          <label for="target-name">Name</label>
+          <input id="target-name" type="text" value="t_voxel_target" autocomplete="off">
+        </section>
+
+        <section class="panel-section">
+          <div class="section-title">Dimensions</div>
+          <div class="triple-inputs">
+            <label>X<input id="dim-x" type="number" min="1" max="12" value="3"></label>
+            <label>Y<input id="dim-y" type="number" min="1" max="12" value="1"></label>
+            <label>Z<input id="dim-z" type="number" min="1" max="12" value="3"></label>
+          </div>
+        </section>
+
+        <section class="panel-section">
+          <div class="section-title">Shape</div>
+          <div class="button-row">
+            <button id="clear-button" type="button">Clear</button>
+            <button id="fill-layer-button" type="button">Fill Layer</button>
+            <button id="fill-button" type="button">Fill All</button>
+          </div>
+        </section>
+
+        <section class="panel-section">
+          <div class="section-title">Marker Settings</div>
+          <label for="dictionary-select">Dictionary</label>
+          <select id="dictionary-select">
+            <option value="auto">Auto</option>
+          </select>
+          <div class="two-inputs">
+            <label>Voxel mm<input id="voxel-size" type="number" min="1" step="1" value="24"></label>
+            <label>Tag mm<input id="tag-size" type="number" min="1" step="1" value="18"></label>
+          </div>
+          <div class="two-inputs">
+            <label>Margin<input id="margin-cells" type="number" min="0" step="1" value="1"></label>
+            <label>Border<input id="border-cells" type="number" min="0" step="1" value="1"></label>
+          </div>
+          <div class="two-inputs">
+            <label>Extruder<input id="extruder" type="number" min="1" step="1" value="1"></label>
+            <label class="checkbox-box">
+              <input id="invert" type="checkbox">
+              Invert
+            </label>
+          </div>
+        </section>
+
+        <section class="panel-section stats-section">
+          <div class="stat-row"><span>Occupied</span><strong id="voxel-count">0</strong></div>
+          <div class="stat-row"><span>Markers</span><strong id="marker-count">0</strong></div>
+          <div class="stat-row"><span>Dictionary</span><strong id="dictionary-status">Auto</strong></div>
+        </section>
+
+        <button id="export-button" class="primary-button" type="button">Download YAML</button>
+        <div id="status-line" class="status-line" role="status"></div>
+      </aside>
+
+      <section class="stage-panel" aria-label="Voxel designer">
+        <div class="preview-grid">
+          <section class="viewport-shell" aria-label="Voxel editor">
+            <div class="viewport-toolbar">
+              <span id="hover-label">No voxel selected</span>
+              <span id="editor-layer-status">All layers / editing Z 0</span>
+            </div>
+            <div id="editor-viewport" class="viewport">
+              <div class="layer-rail" aria-label="Layer controls">
+                <button id="show-all-toggle" class="layer-toggle active" type="button" aria-pressed="true">All</button>
+                <div id="layer-buttons" class="layer-buttons"></div>
+              </div>
+            </div>
+          </section>
+          <section class="viewport-shell" aria-label="Textured preview">
+            <div class="viewport-toolbar">
+              <span>Textured OBJ Preview</span>
+              <span id="preview-status">Ready</span>
+            </div>
+            <div id="preview-viewport" class="viewport"></div>
+          </section>
+        </div>
+      </section>
+    </main>
+
+    <div id="command-modal" class="modal-backdrop" hidden>
+      <div class="command-modal" role="dialog" aria-modal="true" aria-labelledby="command-modal-title">
+        <div class="modal-header">
+          <div>
+            <h2 id="command-modal-title">Generate Printable Files</h2>
+            <p id="command-modal-subtitle">Run these commands after the YAML downloads.</p>
+          </div>
+          <button id="modal-close" class="icon-button" type="button" aria-label="Close">x</button>
+        </div>
+        <pre class="command-block"><code id="command-text"></code></pre>
+        <div class="output-list">
+          <div>3MF: <code id="output-3mf"></code></div>
+          <div>MuJoCo XML: <code id="output-xml"></code></div>
+          <div>OBJ: <code id="output-obj"></code></div>
+        </div>
+        <div class="modal-actions">
+          <button id="copy-command" type="button">Copy Command</button>
+          <button id="modal-done" class="primary-button" type="button">Done</button>
+        </div>
+      </div>
+    </div>
+
+    <script src="./app.js"></script>
+  </body>
+</html>
