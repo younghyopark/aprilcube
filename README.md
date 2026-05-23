@@ -13,6 +13,41 @@ Generate 3D-printable fiducial targets with ArUco or AprilTag markers, then dete
 
 Cuboid targets are parameterized by grid layout, tag dictionary, tag size, margins, and borders. Voxel targets are specified as unions of axis-aligned voxel cuboids; the generator places one marker on each exposed voxel face and writes exact 3D corner coordinates into `config.json`. Both modules share the same config, so the detector knows the precise 3D position of every tag corner even when the target is not a box.
 
+## Technical Report
+
+Read the technical report: [AprilCube: 3D-Printable Fiducial Targets for Reliable 6-DoF Pose Estimation](docs/paper.pdf).
+
+If you use AprilCube in research, please cite:
+
+```bibtex
+@misc{park2026aprilcube,
+  author       = {Park, Younghyo and Agrawal, Pulkit},
+  title        = {{AprilCube}: 3D-Printable Fiducial Targets for Reliable 6-DoF Pose Estimation},
+  year         = {2026},
+  howpublished = {\url{https://github.com/younghyopark/aprilcube}},
+  note         = {Software repository, version 0.2.0}
+}
+```
+
+## Update Log
+
+### v0.2.0
+
+This release expands AprilCube from cuboid-only fiducial blocks into a broader target-design toolkit:
+
+#### New Features
+
+- Added YAML generation specs for `cuboid`, `voxel_cuboids`, and `voxel_grid` targets, including CLI overrides via `aprilcube generate target.yaml`.
+- Added expressive voxel targets with one marker per exposed voxel face and explicit per-marker `corners_mm`, `face_corners_mm`, voxel, face, and normal metadata in `config.json`.
+- Updated detection to consume explicit marker geometry, so non-cuboid targets can use the same multi-marker PnP and filtering pipeline as classic cubes.
+- Added a standalone browser voxel designer through `aprilcube web`, with a Three.js shape editor, textured preview, dictionary sizing checks, YAML export, and printable-output command guidance.
+- Added ready-to-print example target specs and generated assets for T, L, stair-step, U, plus, spiral tower, zigzag snake, window-frame, and chair shapes.
+- Added per-target README files, thumbnails, textured OBJ assets, and MuJoCo MJCF exports.
+
+#### Bug Fixes
+
+- Fixed 3MF compatibility with the latest Bambu Studio app by writing Bambu Studio 2.x project metadata.
+
 ## Installation
 
 ```bash
@@ -445,20 +480,6 @@ Any Bambu Lab printer with AMS or AMS Lite:
 1. Open `cube.3mf` in Bambu Studio
 2. Use filament colors: extruder 1 = black, extruder 2 = white (PLA recommended)
 3. Slice and print — the 3MF uses `paint_color` attributes for automatic color assignment
-
-## Citation
-
-If you use AprilCube in research, please cite the repository:
-
-```bibtex
-@misc{park2026aprilcube,
-  author       = {Park, Younghyo},
-  title        = {{AprilCube}: 3D-Printable Fiducial Targets for Reliable 6-DoF Pose Estimation},
-  year         = {2026},
-  howpublished = {\url{https://github.com/younghyopark/aprilcube}},
-  note         = {Software repository, version 0.2.0}
-}
-```
 
 ## License
 
