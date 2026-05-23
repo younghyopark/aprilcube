@@ -1,7 +1,7 @@
 output: models/spiral_tower_target
 shape:
   type: voxel_cuboids
-  voxel_size_mm: 24
+  voxel_size_mm: 32
   cuboids:
     - name: step_0_front
       origin: [0, 0, 0]
@@ -19,7 +19,7 @@ dictionary: 4x4_50
 markers:
   ids: 0-49
 size:
-  tag_size_mm: 18
+  tag_size_mm: 24
 layout:
   margin_cells: 1
   border_cells: 1

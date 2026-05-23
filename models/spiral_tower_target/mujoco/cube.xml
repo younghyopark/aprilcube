@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <mujoco model="aprilcube_voxel_target">
-  <!-- Bounding box: 48 x 48 x 96 mm -->
+  <!-- Bounding box: 64 x 64 x 128 mm -->
   <!-- Origin at target center, units in meters -->
 
   <compiler angle="radian" meshdir="."/>
@@ -15,10 +15,10 @@
     <body name="cube" pos="0 0 0">
       <freejoint name="cube_joint"/>
       <geom name="cube_visual" type="mesh" mesh="cube_mesh" material="cube_mat" contype="0" conaffinity="0" group="1" density="0"/>
-      <geom name="step_0_front_collision" type="box" pos="0.000000 -0.012000 -0.036000" size="0.024000 0.012000 0.012000" density="1250" rgba="0.5 0.5 0.5 0" contype="1" conaffinity="1" group="2"/>
-      <geom name="step_1_right_collision" type="box" pos="0.012000 0.000000 -0.012000" size="0.012000 0.024000 0.012000" density="1250" rgba="0.5 0.5 0.5 0" contype="1" conaffinity="1" group="2"/>
-      <geom name="step_2_back_collision" type="box" pos="0.000000 0.012000 0.012000" size="0.024000 0.012000 0.012000" density="1250" rgba="0.5 0.5 0.5 0" contype="1" conaffinity="1" group="2"/>
-      <geom name="step_3_left_collision" type="box" pos="-0.012000 0.000000 0.036000" size="0.012000 0.024000 0.012000" density="1250" rgba="0.5 0.5 0.5 0" contype="1" conaffinity="1" group="2"/>
+      <geom name="step_0_front_collision" type="box" pos="0.000000 -0.016000 -0.048000" size="0.032000 0.016000 0.016000" density="1250" rgba="0.5 0.5 0.5 0" contype="1" conaffinity="1" group="2"/>
+      <geom name="step_1_right_collision" type="box" pos="0.016000 0.000000 -0.016000" size="0.016000 0.032000 0.016000" density="1250" rgba="0.5 0.5 0.5 0" contype="1" conaffinity="1" group="2"/>
+      <geom name="step_2_back_collision" type="box" pos="0.000000 0.016000 0.016000" size="0.032000 0.016000 0.016000" density="1250" rgba="0.5 0.5 0.5 0" contype="1" conaffinity="1" group="2"/>
+      <geom name="step_3_left_collision" type="box" pos="-0.016000 0.000000 0.048000" size="0.016000 0.032000 0.016000" density="1250" rgba="0.5 0.5 0.5 0" contype="1" conaffinity="1" group="2"/>
       <site name="cube_center" pos="0 0 0" size="0.001"/>
     </body>
   </worldbody>

@@ -42,3 +42,6 @@ debugging/
 *.fls
 *.log
 *.synctex.gz
+*.bbl
+*.blg
+*.out

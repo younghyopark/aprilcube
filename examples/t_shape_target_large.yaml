@@ -1,0 +1,22 @@
+output: models/t_shape_target_large
+shape:
+  type: voxel_cuboids
+  voxel_size_mm: 32
+  cuboids:
+    - name: stem
+      origin: [1, 0, 0]
+      size: [1, 1, 4]
+    - name: crossbar
+      origin: [0, 0, 3]
+      size: [3, 1, 1]
+dictionary: 4x4_50
+markers:
+  ids: 0-63
+size:
+  tag_size_mm: 24
+layout:
+  margin_cells: 1
+  border_cells: 1
+material:
+  extruder: 1
+  invert: false
