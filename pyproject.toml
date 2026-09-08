@@ -4,12 +4,12 @@ build-backend = "hatchling.build"
 
 [project]
 name = "aprilcube"
-version = "0.2.0"
+version = "0.3.0"
 description = "Generate and detect ArUco/AprilTag cubes for 6-DOF pose estimation"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "opencv-contrib-python>=4.8",
+    "opencv-contrib-python>=4.8,<5",
     "numpy>=1.24",
     "pyyaml>=6.0",
 ]
@@ -21,3 +21,25 @@ test = [
 
 [project.scripts]
 aprilcube = "aprilcube.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/younghyopark/aprilcube"
+Documentation = "https://github.com/younghyopark/aprilcube/blob/main/docs/usage.md"
+Issues = "https://github.com/younghyopark/aprilcube/issues"
+Changelog = "https://github.com/younghyopark/aprilcube/blob/main/CHANGELOG.md"
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/src",
+    "/tests/*.py",
+    "/tests/README.md",
+    "/examples",
+    "/assets/end_effector_connector.stl",
+    "/docs/usage.md",
+    "/README.md",
+    "/CHANGELOG.md",
+    "/pyproject.toml",
+]
+
+[tool.hatch.build.targets.wheel.force-include]
+"assets/end_effector_connector.stl" = "aprilcube/assets/end_effector_connector.stl"

@@ -11,9 +11,11 @@ For a non-square grid (e.g. 2x3):
 import argparse
 import json
 import os
+import struct
 import sys
 import zipfile
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -65,11 +67,43 @@ FACE_DEFS = [
 
 BAMBU_STUDIO_VERSION = "02.00.00.00"
 BAMBU_STUDIO_APPLICATION = f"BambuStudio-{BAMBU_STUDIO_VERSION}"
+DEFAULT_CONNECTOR_STL = "assets/end_effector_connector.stl"
+DEFAULT_CONNECTOR_ROD_RADIUS_MM = 10.0
+DEFAULT_CONNECTOR_OVERLAP_MM = 1.0
+DEFAULT_CONNECTOR_SEGMENTS = 64
 
 
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
+def _normalize_border_cells(value: float) -> float | int:
+    """Validate and canonicalize an outer border measured in logical cells."""
+    border = float(value)
+    if not np.isfinite(border) or border < 0:
+        raise ValueError("border_cells must be a non-negative finite number")
+    half_steps = int(round(border * 2.0))
+    if abs(border * 2.0 - half_steps) > 1e-9:
+        raise ValueError("border_cells must use increments of 0.5 cells")
+    normalized = half_steps / 2.0
+    return int(normalized) if normalized.is_integer() else normalized
+
+
+def _border_layout_scale(border_cells: float) -> int:
+    """Return raster units per logical marker cell for the requested border."""
+    normalized = _normalize_border_cells(border_cells)
+    return 2 if int(round(float(normalized) * 2.0)) % 2 else 1
+
+
+@dataclass
+class AttachmentConfig:
+    enabled: bool = False
+    rod_length_mm: float = 0.0
+    rod_radius_mm: float = DEFAULT_CONNECTOR_ROD_RADIUS_MM
+    connector_stl: str | None = None
+    overlap_mm: float = DEFAULT_CONNECTOR_OVERLAP_MM
+    segments: int = DEFAULT_CONNECTOR_SEGMENTS
+
+
 @dataclass
 class CubeConfig:
     grid_x: int           # tags in X dimension
@@ -80,7 +114,7 @@ class CubeConfig:
     tag_ids: list[int]
     tag_size_mm: float    # 0 if computed from cell_size
     margin_cells: int = 1    # cells between adjacent tags
-    border_cells: int = 1    # cells of outer border per face edge
+    border_cells: float = 1  # logical cells of outer border per face edge
     cell_size_mm: float = 0.0  # 0 = derive from tag_size
     extruder: int = 1
     invert: bool = False
@@ -98,9 +132,18 @@ class CubeConfig:
 
     def _axis_cells(self, n_tags: int) -> int:
         mp, mc, bc = self.marker_pixels, self.margin_cells, self.border_cells
-        return 2 * bc + n_tags * mp + max(0, n_tags - 1) * mc
+        axis_cells = 2 * bc + n_tags * mp + max(0, n_tags - 1) * mc
+        rounded = int(round(axis_cells))
+        if abs(axis_cells - rounded) > 1e-9:
+            raise ValueError("target dimensions must resolve to whole logical cells")
+        return rounded
+
+    @property
+    def layout_scale(self) -> int:
+        return _border_layout_scale(self.border_cells)
 
     def compute(self):
+        self.border_cells = _normalize_border_cells(self.border_cells)
         dictionary = cv2.aruco.getPredefinedDictionary(self.dict_id)
         self.marker_pixels = dictionary.markerSize + 2  # +2 for 1-cell border
 
@@ -146,11 +189,12 @@ class GenerationSpec:
     tag_size_mm: float | None = None
     cell_size_mm: float | None = None
     margin_cells: int | None = None
-    border_cells: int | None = None
+    border_cells: float | None = None
     extruder: int | None = None
     invert: bool | None = None
     shape_type: str = "cuboid"
     shape: dict[str, Any] | None = None
+    attachment: AttachmentConfig | None = None
     source_path: str | None = None
 
 
@@ -184,14 +228,26 @@ def build_face_grid(
     marker_pixels: int,
     margin_cells: int,
     invert: bool,
+    layout_scale: int = 1,
 ) -> np.ndarray:
-    """Compose the full pixel grid for one face.  True = black."""
-    grid = np.zeros((down_cells, right_cells), dtype=bool)
+    """Compose one face raster. True is black; scale 2 supports half cells."""
+    if layout_scale not in {1, 2}:
+        raise ValueError("layout_scale must be 1 or 2")
 
-    tag_block_w = face_cols * marker_pixels + max(0, face_cols - 1) * margin_cells
-    tag_block_h = face_rows * marker_pixels + max(0, face_rows - 1) * margin_cells
-    row_off = (down_cells - tag_block_h) // 2
-    col_off = (right_cells - tag_block_w) // 2
+    down_units = down_cells * layout_scale
+    right_units = right_cells * layout_scale
+    marker_units = marker_pixels * layout_scale
+    margin_units = margin_cells * layout_scale
+    grid = np.zeros((down_units, right_units), dtype=bool)
+
+    tag_block_w = face_cols * marker_units + max(0, face_cols - 1) * margin_units
+    tag_block_h = face_rows * marker_units + max(0, face_rows - 1) * margin_units
+    if down_units < tag_block_h or right_units < tag_block_w:
+        raise ValueError("marker block does not fit within the face grid")
+    if (down_units - tag_block_h) % 2 or (right_units - tag_block_w) % 2:
+        raise ValueError("layout_scale=2 is required to center a half-cell offset")
+    row_off = (down_units - tag_block_h) // 2
+    col_off = (right_units - tag_block_w) // 2
 
     for r in range(face_rows):
         for c in range(face_cols):
@@ -199,9 +255,11 @@ def build_face_grid(
             if idx >= len(tag_patterns):
                 continue
             pat = tag_patterns[idx]
-            rs = row_off + r * (marker_pixels + margin_cells)
-            cs = col_off + c * (marker_pixels + margin_cells)
-            grid[rs:rs + marker_pixels, cs:cs + marker_pixels] = pat
+            if layout_scale == 2:
+                pat = np.repeat(np.repeat(pat, 2, axis=0), 2, axis=1)
+            rs = row_off + r * (marker_units + margin_units)
+            cs = col_off + c * (marker_units + margin_units)
+            grid[rs:rs + marker_units, cs:cs + marker_units] = pat
 
     if invert:
         grid = ~grid
@@ -272,6 +330,8 @@ def write_cube_obj(
     atlas_h: int,
     obj_path: str,
     mtl_path: str,
+    attachment: AttachmentConfig | None = None,
+    source_path: str | None = None,
 ):
     """Write Wavefront OBJ + MTL for the cube with UV-mapped atlas texture."""
     bx, by, bz = config.box_dims
@@ -292,6 +352,17 @@ def write_cube_obj(
         (-hx, +hy, +hz),  # 6
         (+hx, +hy, +hz),  # 7
     ]
+
+    attachment_vertices_m: list[tuple[float, float, float]] = []
+    attachment_faces: list[tuple[int, int, int]] = []
+    if attachment is not None and attachment.enabled:
+        attachment_vertices_mm, attachment_faces, _meta = build_end_effector_attachment_mesh(
+            config.box_dims, attachment, source_path,
+        )
+        attachment_vertices_m = [
+            (x / 1000.0, y / 1000.0, z / 1000.0)
+            for x, y, z in attachment_vertices_mm
+        ]
 
     vt_list: list[tuple[float, float]] = []  # UV coordinates
     face_lines: list[str] = []  # OBJ face lines
@@ -358,6 +429,11 @@ def write_cube_obj(
         f.write("Kd 1.0 1.0 1.0\n")
         f.write("Ks 0.0 0.0 0.0\n")
         f.write("map_Kd cube_atlas.png\n")
+        if attachment_vertices_m:
+            f.write("\nnewmtl connector_material\n")
+            f.write("Ka 0.02 0.02 0.02\n")
+            f.write("Kd 0.02 0.02 0.02\n")
+            f.write("Ks 0.0 0.0 0.0\n")
 
     # Write OBJ
     with open(obj_path, "w") as f:
@@ -366,12 +442,19 @@ def write_cube_obj(
         f.write("usemtl cube_material\n\n")
         for x, y, z in corners:
             f.write(f"v {x:.6f} {y:.6f} {z:.6f}\n")
+        for x, y, z in attachment_vertices_m:
+            f.write(f"v {x:.6f} {y:.6f} {z:.6f}\n")
         f.write("\n")
         for u, v in vt_list:
             f.write(f"vt {u:.6f} {v:.6f}\n")
         f.write("\n")
         for fl in face_lines:
             f.write(fl + "\n")
+        if attachment_faces:
+            f.write("\nusemtl connector_material\n")
+            v_base = len(corners) + 1
+            for v1, v2, v3 in attachment_faces:
+                f.write(f"f {v_base + v1} {v_base + v2} {v_base + v3}\n")
 
     print(f"Wrote {obj_path}")
 
@@ -414,8 +497,14 @@ def write_mujoco_xml(config: CubeConfig, xml_path: str):
     print(f"Wrote {xml_path}")
 
 
-def write_mujoco_assets(config: CubeConfig, face_grids: dict[str, np.ndarray],
-                        out_dir: str, pixels_per_cell: int = 8):
+def write_mujoco_assets(
+    config: CubeConfig,
+    face_grids: dict[str, np.ndarray],
+    out_dir: str,
+    pixels_per_cell: int = 8,
+    attachment: AttachmentConfig | None = None,
+    source_path: str | None = None,
+):
     """Write all MuJoCo assets: atlas texture, OBJ mesh, MTL, and MJCF XML."""
     mj_dir = os.path.join(out_dir, "mujoco")
     os.makedirs(mj_dir, exist_ok=True)
@@ -437,7 +526,10 @@ def write_mujoco_assets(config: CubeConfig, face_grids: dict[str, np.ndarray],
     # Write OBJ + MTL
     obj_path = os.path.join(mj_dir, "cube.obj")
     mtl_path = os.path.join(mj_dir, "cube.mtl")
-    write_cube_obj(config, regions, atlas_w, atlas_h, obj_path, mtl_path)
+    write_cube_obj(
+        config, regions, atlas_w, atlas_h, obj_path, mtl_path,
+        attachment=attachment, source_path=source_path,
+    )
 
     # Write MuJoCo XML
     xml_path = os.path.join(mj_dir, "cube.xml")
@@ -482,8 +574,24 @@ def write_voxel_obj(
     atlas_h: int,
     obj_path: str,
     mtl_path: str,
+    attachment: AttachmentConfig | None = None,
+    source_path: str | None = None,
+    box_dims: tuple[float, float, float] | None = None,
 ) -> None:
     """Write Wavefront OBJ + MTL for a voxel target with per-face UVs."""
+    attachment_vertices_m: list[tuple[float, float, float]] = []
+    attachment_faces: list[tuple[int, int, int]] = []
+    if attachment is not None and attachment.enabled:
+        if box_dims is None:
+            raise ValueError("voxel OBJ attachment export requires target box dimensions")
+        attachment_vertices_mm, attachment_faces, _meta = build_end_effector_attachment_mesh(
+            box_dims, attachment, source_path,
+        )
+        attachment_vertices_m = [
+            (x / 1000.0, y / 1000.0, z / 1000.0)
+            for x, y, z in attachment_vertices_mm
+        ]
+
     mtl_name = os.path.basename(mtl_path)
     with open(mtl_path, "w") as f:
         f.write("# AprilCube voxel target material\n")
@@ -492,6 +600,11 @@ def write_voxel_obj(
         f.write("Kd 1.0 1.0 1.0\n")
         f.write("Ks 0.0 0.0 0.0\n")
         f.write("map_Kd cube_atlas.png\n")
+        if attachment_vertices_m:
+            f.write("\nnewmtl connector_material\n")
+            f.write("Ka 0.02 0.02 0.02\n")
+            f.write("Kd 0.02 0.02 0.02\n")
+            f.write("Ks 0.0 0.0 0.0\n")
 
     vertices: list[tuple[float, float, float]] = []
     vt_list: list[tuple[float, float]] = []
@@ -526,12 +639,19 @@ def write_voxel_obj(
         f.write("usemtl cube_material\n\n")
         for x, y, z in vertices:
             f.write(f"v {x:.6f} {y:.6f} {z:.6f}\n")
+        for x, y, z in attachment_vertices_m:
+            f.write(f"v {x:.6f} {y:.6f} {z:.6f}\n")
         f.write("\n")
         for u, v in vt_list:
             f.write(f"vt {u:.6f} {v:.6f}\n")
         f.write("\n")
         for fl in face_lines:
             f.write(fl + "\n")
+        if attachment_faces:
+            f.write("\nusemtl connector_material\n")
+            v_base = len(vertices) + 1
+            for v1, v2, v3 in attachment_faces:
+                f.write(f"f {v_base + v1} {v_base + v2} {v_base + v3}\n")
 
     print(f"Wrote {obj_path}")
 
@@ -625,6 +745,8 @@ def write_voxel_mujoco_assets(
     center_abs: tuple[float, float, float],
     out_dir: str,
     pixels_per_cell: int = 8,
+    attachment: AttachmentConfig | None = None,
+    source_path: str | None = None,
 ) -> None:
     """Write MuJoCo assets for an arbitrary voxel target."""
     mj_dir = os.path.join(out_dir, "mujoco")
@@ -638,7 +760,10 @@ def write_voxel_mujoco_assets(
     atlas_h, atlas_w = atlas.shape[:2]
     obj_path = os.path.join(mj_dir, "cube.obj")
     mtl_path = os.path.join(mj_dir, "cube.mtl")
-    write_voxel_obj(marker_faces, regions, atlas_w, atlas_h, obj_path, mtl_path)
+    write_voxel_obj(
+        marker_faces, regions, atlas_w, atlas_h, obj_path, mtl_path,
+        attachment=attachment, source_path=source_path, box_dims=config.box_dims,
+    )
 
     collision_boxes = _voxel_collision_boxes(source_cuboids, occupied, voxel_size, center_abs)
     xml_path = os.path.join(mj_dir, "cube.xml")
@@ -707,8 +832,8 @@ def _build_tag_centers(config: CubeConfig) -> dict[str, list[tuple[int, np.ndarr
 
         tag_block_w = face_cols * mp + max(0, face_cols - 1) * config.margin_cells
         tag_block_h = face_rows * mp + max(0, face_rows - 1) * config.margin_cells
-        row_off = (down_cells - tag_block_h) // 2
-        col_off = (right_cells - tag_block_w) // 2
+        row_off = (down_cells - tag_block_h) / 2.0
+        col_off = (right_cells - tag_block_w) / 2.0
 
         half = [config.box_dims[0] / 2, config.box_dims[1] / 2, config.box_dims[2] / 2]
         face_pos = normal_sign * half[normal_ax]
@@ -1040,6 +1165,244 @@ class CubeMeshBuilder:
                 self.triangles.append((p00, p10, p11, is_painted))
                 self.triangles.append((p00, p11, p01, is_painted))
 
+    def add_mesh(
+        self,
+        vertices: list[tuple[float, float, float]],
+        faces: list[tuple[int, int, int]],
+        painted: bool = False,
+    ) -> None:
+        """Append an untextured triangle mesh in generator coordinates."""
+        index_map = [self._add_vertex(*vertex) for vertex in vertices]
+        for v1, v2, v3 in faces:
+            self.triangles.append((index_map[v1], index_map[v2], index_map[v3], painted))
+
+
+# ---------------------------------------------------------------------------
+# End-effector attachment mesh helpers
+# ---------------------------------------------------------------------------
+def _resolve_connector_stl_path(
+    connector_stl: str | None,
+    source_path: str | None = None,
+) -> Path:
+    if connector_stl:
+        candidate = Path(connector_stl).expanduser()
+        if candidate.is_absolute():
+            return candidate
+        if source_path:
+            source_relative = Path(source_path).resolve().parent / candidate
+            if source_relative.exists():
+                return source_relative
+        return Path.cwd() / candidate
+
+    candidates = [
+        Path.cwd() / DEFAULT_CONNECTOR_STL,
+        Path(__file__).resolve().parents[2] / DEFAULT_CONNECTOR_STL,
+        Path(__file__).resolve().parents[1] / DEFAULT_CONNECTOR_STL,
+        Path(__file__).resolve().parent / "assets" / "end_effector_connector.stl",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[0]
+
+
+def _load_stl_mesh(path: Path) -> tuple[list[tuple[float, float, float]], list[tuple[int, int, int]]]:
+    data = path.read_bytes()
+    vertices: list[tuple[float, float, float]] = []
+    faces: list[tuple[int, int, int]] = []
+
+    if len(data) >= 84:
+        tri_count = struct.unpack("<I", data[80:84])[0]
+        expected = 84 + tri_count * 50
+        if expected == len(data):
+            offset = 84
+            for idx in range(tri_count):
+                values = struct.unpack("<12fH", data[offset:offset + 50])
+                base = len(vertices)
+                vertices.extend([
+                    (values[3], values[4], values[5]),
+                    (values[6], values[7], values[8]),
+                    (values[9], values[10], values[11]),
+                ])
+                faces.append((base, base + 1, base + 2))
+                offset += 50
+            return vertices, faces
+
+    text = data.decode("utf-8", errors="ignore")
+    pending: list[tuple[float, float, float]] = []
+    for raw_line in text.splitlines():
+        parts = raw_line.strip().split()
+        if len(parts) == 4 and parts[0].lower() == "vertex":
+            pending.append((float(parts[1]), float(parts[2]), float(parts[3])))
+            if len(pending) == 3:
+                base = len(vertices)
+                vertices.extend(pending)
+                faces.append((base, base + 1, base + 2))
+                pending = []
+
+    if not faces:
+        raise ValueError(f"STL file contains no triangles: {path}")
+    return vertices, faces
+
+
+def _cylinder_mesh_z(
+    radius: float,
+    z_min: float,
+    z_max: float,
+    segments: int,
+) -> tuple[list[tuple[float, float, float]], list[tuple[int, int, int]]]:
+    if segments < 8:
+        raise ValueError("connector rod cylinder must use at least 8 segments")
+    vertices: list[tuple[float, float, float]] = [(0.0, 0.0, z_min), (0.0, 0.0, z_max)]
+    faces: list[tuple[int, int, int]] = []
+    bottom_start = len(vertices)
+    for idx in range(segments):
+        theta = 2.0 * np.pi * idx / segments
+        vertices.append((radius * float(np.cos(theta)), radius * float(np.sin(theta)), z_min))
+    top_start = len(vertices)
+    for idx in range(segments):
+        theta = 2.0 * np.pi * idx / segments
+        vertices.append((radius * float(np.cos(theta)), radius * float(np.sin(theta)), z_max))
+
+    for idx in range(segments):
+        nxt = (idx + 1) % segments
+        b0 = bottom_start + idx
+        b1 = bottom_start + nxt
+        t0 = top_start + idx
+        t1 = top_start + nxt
+        faces.append((b0, b1, t1))
+        faces.append((b0, t1, t0))
+        faces.append((0, b1, b0))
+        faces.append((1, t0, t1))
+    return vertices, faces
+
+
+def _append_mesh(
+    vertices: list[tuple[float, float, float]],
+    faces: list[tuple[int, int, int]],
+    add_vertices: list[tuple[float, float, float]],
+    add_faces: list[tuple[int, int, int]],
+) -> None:
+    base = len(vertices)
+    vertices.extend(add_vertices)
+    faces.extend((base + v1, base + v2, base + v3) for v1, v2, v3 in add_faces)
+
+
+def _mesh_bounds(
+    vertices: list[tuple[float, float, float]],
+) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
+    arr = np.asarray(vertices, dtype=np.float64)
+    lo = tuple(float(v) for v in arr.min(axis=0))
+    hi = tuple(float(v) for v in arr.max(axis=0))
+    return lo, hi
+
+
+def _validate_attachment_config(
+    attachment: AttachmentConfig,
+    source_path: str | None = None,
+) -> Path:
+    if attachment.rod_length_mm <= 0:
+        raise ValueError(
+            "end-effector connector requires a positive rod length "
+            "(use --connector-rod-length LENGTH_MM)"
+        )
+    if attachment.rod_radius_mm <= 0:
+        raise ValueError("connector rod radius must be positive")
+    if attachment.overlap_mm < 0:
+        raise ValueError("connector overlap must be non-negative")
+    if attachment.segments < 8:
+        raise ValueError("connector rod cylinder must use at least 8 segments")
+    stl_path = _resolve_connector_stl_path(attachment.connector_stl, source_path)
+    if not stl_path.exists():
+        raise ValueError(f"end-effector connector STL not found: {stl_path}")
+    return stl_path
+
+
+def build_end_effector_attachment_mesh(
+    box_dims: tuple[float, float, float],
+    attachment: AttachmentConfig,
+    source_path: str | None = None,
+) -> tuple[
+    list[tuple[float, float, float]],
+    list[tuple[int, int, int]],
+    dict[str, Any],
+]:
+    """Return rod + connector mesh in target coordinates, in millimeters."""
+    if not attachment.enabled:
+        return [], [], {}
+    stl_path = _validate_attachment_config(attachment, source_path)
+
+    top_z = box_dims[2] / 2.0
+    vertices: list[tuple[float, float, float]] = []
+    faces: list[tuple[int, int, int]] = []
+
+    rod_z_min = top_z - attachment.overlap_mm
+    rod_z_max = top_z + attachment.rod_length_mm + attachment.overlap_mm
+    rod_vertices, rod_faces = _cylinder_mesh_z(
+        attachment.rod_radius_mm,
+        rod_z_min,
+        rod_z_max,
+        attachment.segments,
+    )
+    _append_mesh(vertices, faces, rod_vertices, rod_faces)
+
+    stl_vertices, stl_faces = _load_stl_mesh(stl_path)
+    # Mount the connector upside down relative to the STL authoring frame.
+    # A 180-degree X rotation is a rigid transform, unlike mirroring Z alone.
+    rotated_stl = [(x, -y, -z) for x, y, z in stl_vertices]
+    stl_min, stl_max = _mesh_bounds(rotated_stl)
+    stl_center_x = (stl_min[0] + stl_max[0]) / 2.0
+    stl_center_y = (stl_min[1] + stl_max[1]) / 2.0
+    connector_bottom_z = top_z + attachment.rod_length_mm
+    z_offset = connector_bottom_z - stl_min[2]
+    transformed_stl = [
+        (x - stl_center_x, y - stl_center_y, z + z_offset)
+        for x, y, z in rotated_stl
+    ]
+    _append_mesh(vertices, faces, transformed_stl, stl_faces)
+
+    mesh_min, mesh_max = _mesh_bounds(vertices)
+    connector_min, connector_max = _mesh_bounds(transformed_stl)
+    metadata = {
+        "type": "end_effector_connector",
+        "axis": "+Z",
+        "connector_stl": attachment.connector_stl or DEFAULT_CONNECTOR_STL,
+        "connector_rotation_degrees": [180.0, 0.0, 0.0],
+        "rod_length_mm": attachment.rod_length_mm,
+        "rod_radius_mm": attachment.rod_radius_mm,
+        "overlap_mm": attachment.overlap_mm,
+        "rod_segments": attachment.segments,
+        "surface_z_mm": top_z,
+        "rod_start_z_mm": top_z,
+        "rod_end_z_mm": top_z + attachment.rod_length_mm,
+        "connector_bounds_mm": [list(connector_min), list(connector_max)],
+        "mesh_bounds_mm": [list(mesh_min), list(mesh_max)],
+        "triangle_count": len(faces),
+        "connector_triangle_count": len(stl_faces),
+        "rod_triangle_count": len(rod_faces),
+        "connector_vertex_count": len(transformed_stl),
+    }
+    return vertices, faces, metadata
+
+
+def add_end_effector_attachment(
+    builder: CubeMeshBuilder,
+    box_dims: tuple[float, float, float],
+    attachment: AttachmentConfig | None,
+    source_path: str | None = None,
+) -> dict[str, Any] | None:
+    if attachment is None or not attachment.enabled:
+        return None
+    vertices, faces, metadata = build_end_effector_attachment_mesh(
+        box_dims, attachment, source_path,
+    )
+    builder.add_mesh(vertices, faces, painted=False)
+    print(
+        "Attachment: end-effector connector on +Z, "
+        f"rod {attachment.rod_length_mm:.4g} mm x r{attachment.rod_radius_mm:.4g} mm"
+    )
+    return metadata
+
 
 # ---------------------------------------------------------------------------
 # 3MF writer
@@ -1300,6 +1663,84 @@ def _maybe_bool(value: Any) -> bool | None:
     return bool(value)
 
 
+def _load_attachment_config(data: dict[str, Any]) -> AttachmentConfig | None:
+    raw = _first_present(data.get("attachment"), data.get("mount"), data.get("end_effector"))
+    if raw is None and data.get("end_effector_connector") is not None:
+        raw = {"enabled": data.get("end_effector_connector")}
+    if raw is None:
+        return None
+
+    if isinstance(raw, bool):
+        mapping: dict[str, Any] = {"enabled": raw}
+    elif isinstance(raw, str):
+        lowered = raw.strip().lower()
+        as_bool = _maybe_bool(raw)
+        if as_bool is not None and lowered in {"1", "0", "true", "false", "yes", "no", "on", "off"}:
+            mapping = {"enabled": as_bool}
+        else:
+            mapping = {"enabled": True, "type": raw}
+    else:
+        mapping = _as_mapping(raw, "attachment")
+
+    attach_type = str(mapping.get("type", "end_effector_connector")).lower().replace("-", "_")
+    if attach_type not in {"end_effector_connector", "connector", "robot_connector"}:
+        raise ValueError(
+            f"Unsupported attachment.type '{attach_type}'. Expected end_effector_connector."
+        )
+
+    enabled = _maybe_bool(_first_present(
+        mapping.get("enabled"),
+        mapping.get("attach"),
+        mapping.get("end_effector_connector"),
+    ))
+    if enabled is None:
+        enabled = True
+
+    rod_length = _first_present(
+        mapping.get("rod_length_mm"),
+        mapping.get("rod_length"),
+        mapping.get("length_mm"),
+        mapping.get("length"),
+        data.get("connector_rod_length_mm"),
+        data.get("connector_rod_length"),
+    )
+    rod_radius = _first_present(
+        mapping.get("rod_radius_mm"),
+        mapping.get("rod_radius"),
+        mapping.get("radius_mm"),
+        mapping.get("radius"),
+        data.get("connector_rod_radius_mm"),
+        data.get("connector_rod_radius"),
+        DEFAULT_CONNECTOR_ROD_RADIUS_MM,
+    )
+    connector_stl = _first_present(
+        mapping.get("connector_stl"),
+        mapping.get("stl"),
+        mapping.get("path"),
+        mapping.get("connector_path"),
+        data.get("connector_stl"),
+    )
+    overlap = _first_present(
+        mapping.get("overlap_mm"),
+        mapping.get("overlap"),
+        DEFAULT_CONNECTOR_OVERLAP_MM,
+    )
+    segments = _first_present(
+        mapping.get("segments"),
+        mapping.get("rod_segments"),
+        DEFAULT_CONNECTOR_SEGMENTS,
+    )
+
+    return AttachmentConfig(
+        enabled=enabled,
+        rod_length_mm=0.0 if rod_length is None else float(rod_length),
+        rod_radius_mm=float(rod_radius),
+        connector_stl=None if connector_stl is None else str(connector_stl),
+        overlap_mm=float(overlap),
+        segments=int(segments),
+    )
+
+
 def _load_yaml_mapping(path: str | os.PathLike[str]) -> dict[str, Any]:
     try:
         import yaml
@@ -1361,13 +1802,14 @@ def load_generation_spec(path: str | os.PathLike[str]) -> GenerationSpec:
         margin_cells=_maybe_int(_first_present(
             layout.get("margin_cells"), layout.get("margin_cell"), data.get("margin_cells"), data.get("margin_cell"),
         )),
-        border_cells=_maybe_int(_first_present(
+        border_cells=_maybe_float(_first_present(
             layout.get("border_cells"), layout.get("border_cell"), data.get("border_cells"), data.get("border_cell"),
         )),
         extruder=_maybe_int(_first_present(material.get("extruder"), data.get("extruder"))),
         invert=_maybe_bool(_first_present(marker.get("invert"), material.get("invert"), data.get("invert"))),
         shape_type=shape_type,
         shape=shape,
+        attachment=_load_attachment_config(data),
         source_path=str(path),
     )
 
@@ -1396,6 +1838,25 @@ def apply_cli_overrides(spec: GenerationSpec, args: argparse.Namespace) -> Gener
         spec.extruder = args.extruder
     if args.invert is not None:
         spec.invert = args.invert
+    attachment_args = (
+        args.end_effector_connector is not None
+        or args.connector_rod_length is not None
+        or args.connector_rod_radius is not None
+        or args.connector_stl is not None
+    )
+    if attachment_args:
+        attachment = spec.attachment or AttachmentConfig()
+        if args.end_effector_connector is not None:
+            attachment.enabled = True
+        if args.connector_rod_length is not None:
+            attachment.enabled = True
+            attachment.rod_length_mm = args.connector_rod_length
+        if args.connector_rod_radius is not None:
+            attachment.rod_radius_mm = args.connector_rod_radius
+        if args.connector_stl is not None:
+            attachment.enabled = True
+            attachment.connector_stl = args.connector_stl
+        spec.attachment = attachment
     return spec
 
 
@@ -1564,8 +2025,8 @@ def _marker_corners_on_voxel_face(
     cell_size: float,
     center_abs: tuple[float, float, float],
 ) -> np.ndarray:
-    row_off = (face_cells - marker_pixels) // 2
-    col_off = (face_cells - marker_pixels) // 2
+    row_off = (face_cells - marker_pixels) / 2.0
+    col_off = (face_cells - marker_pixels) / 2.0
     return np.array([
         _voxel_face_point(voxel, face_def, row_off, col_off + marker_pixels, voxel_size, cell_size, center_abs),
         _voxel_face_point(voxel, face_def, row_off, col_off, voxel_size, cell_size, center_abs),
@@ -1673,6 +2134,13 @@ def render_voxel_thumbnail(
 
 def write_voxel_readme(config_data: dict, out_dir: str) -> None:
     target = config_data["target"]
+    attachment = config_data.get("attachment")
+    attachment_row = ""
+    if attachment:
+        attachment_row = (
+            "| Attachment | +Z end-effector connector, "
+            f"rod {attachment['rod_length_mm']:.4g} mm x r{attachment['rod_radius_mm']:.4g} mm |\n"
+        )
     face_counts: dict[str, int] = {}
     for marker in config_data["markers"]:
         face_counts[marker["face"]] = face_counts.get(marker["face"], 0) + 1
@@ -1695,7 +2163,10 @@ def write_voxel_readme(config_data: dict, out_dir: str) -> None:
 | Dictionary | `{config_data['dict']}` |
 | Tag size | {config_data['tag_size_mm']:.4g} mm |
 | Cell size | {config_data['cell_size_mm']:.4g} mm |
+| Margin | {config_data['margin_cells']} cell ({config_data['margin_cells'] * config_data['cell_size_mm']:.4g} mm) |
+| Border | {config_data['border_cells']} cell ({config_data['border_cells'] * config_data['cell_size_mm']:.4g} mm) |
 | Marker count | {len(config_data['markers'])} |
+{attachment_row.rstrip()}
 
 ## Exposed Face Counts
 
@@ -1735,6 +2206,19 @@ def write_readme(config: CubeConfig, config_data: dict,
     grid_str = f"{config.grid_x}x{config.grid_y}x{config.grid_z}"
     margin_mm = config.margin_cells * cs
     border_mm = config.border_cells * cs
+    attachment = config_data.get("attachment")
+    attachment_row = ""
+    attachment_args = ""
+    if attachment:
+        attachment_row = (
+            "| Attachment | +Z end-effector connector, "
+            f"rod {attachment['rod_length_mm']:.4g} mm x r{attachment['rod_radius_mm']:.4g} mm |\n"
+        )
+        attachment_args = (
+            " --end-effector-connector"
+            f" --connector-rod-length {attachment['rod_length_mm']:.4g}"
+            f" --connector-rod-radius {attachment['rod_radius_mm']:.4g}"
+        )
 
     face_lines = []
     for name, ids in face_tag_map.items():
@@ -1757,6 +2241,7 @@ def write_readme(config: CubeConfig, config_data: dict,
 | Border | {config.border_cells} cell ({border_mm:.4g} mm) |
 | Total tags | {len(config.tag_ids)} |
 | Tag IDs | {config.tag_ids[0]}–{config.tag_ids[-1]} |
+{attachment_row.rstrip()}
 
 ## Face Layout
 
@@ -1785,7 +2270,7 @@ def write_readme(config: CubeConfig, config_data: dict,
 ## Regenerate
 
 ```bash
-aprilcube generate --grid {grid_str} --dict {config.dict_name} --tag-size {config.tag_size_mm:.4g} --margin-cell {config.margin_cells} --border-cell {config.border_cells} -o {os.path.basename(out_dir)}
+aprilcube generate --grid {grid_str} --dict {config.dict_name} --tag-size {config.tag_size_mm:.4g} --margin-cell {config.margin_cells} --border-cell {config.border_cells}{attachment_args} -o {os.path.basename(out_dir)}
 ```
 """
     readme_path = os.path.join(out_dir, "README.md")
@@ -1800,10 +2285,11 @@ def generate_voxel_target(
     dict_id: int,
     out_dir: str,
     margin_cells: int,
-    border_cells: int,
+    border_cells: float,
     extruder: int,
     invert: bool,
 ) -> None:
+    border_cells = _normalize_border_cells(border_cells)
     shape = spec.shape or {}
     voxel_size_value = _first_present(shape.get("voxel_size_mm"), shape.get("voxel_size"))
     if voxel_size_value is None:
@@ -1844,6 +2330,7 @@ def generate_voxel_target(
             f"voxel face has {face_cells} cells, but one marker needs at least "
             f"{marker_pixels + 2 * border_cells} cells with the configured border"
         )
+    layout_scale = 2 if (face_cells - marker_pixels) % 2 else 1
 
     exposed: list[tuple[tuple[int, int, int], tuple]] = []
     for voxel in sorted(occupied):
@@ -1891,8 +2378,12 @@ def generate_voxel_target(
         grid = build_face_grid(
             [pattern], 1, 1, face_cells, face_cells,
             marker_pixels, margin_cells, invert,
+            layout_scale=layout_scale,
         )
-        _add_voxel_face(builder, face_def, voxel, grid, voxel_size, cell_size, center_abs)
+        _add_voxel_face(
+            builder, face_def, voxel, grid, voxel_size,
+            cell_size / layout_scale, center_abs,
+        )
 
         marker_corners = _marker_corners_on_voxel_face(
             voxel, face_def, face_cells, marker_pixels,
@@ -1912,6 +2403,10 @@ def generate_voxel_target(
             "face_corners_mm": face_corners.tolist(),
             "grid": grid,
         })
+
+    attachment_record = add_end_effector_attachment(
+        builder, box_dims, spec.attachment, spec.source_path,
+    )
 
     edges: dict[tuple[int, int], int] = {}
     for v1, v2, v3, _ in builder.triangles:
@@ -1968,6 +2463,8 @@ def generate_voxel_target(
         "marker_pixels": marker_pixels,
         "box_dims": list(box_dims),
     }
+    if attachment_record is not None:
+        config_data["attachment"] = attachment_record
     config_path = os.path.join(out_dir, "config.json")
     with open(config_path, "w") as f:
         json.dump(config_data, f, indent=2)
@@ -1976,6 +2473,7 @@ def generate_voxel_target(
     write_voxel_mujoco_assets(
         dummy_config, marker_records, source_cuboids, occupied,
         voxel_size, center_abs, out_dir,
+        attachment=spec.attachment, source_path=spec.source_path,
     )
 
     thumb_path = os.path.join(out_dir, "thumbnail.png")
@@ -1983,7 +2481,13 @@ def generate_voxel_target(
         f"Voxel target: {len(occupied)} voxels, {needed} marker faces, dict={dict_name}",
         f"Box: {box_dims[0]:.4g} x {box_dims[1]:.4g} x {box_dims[2]:.4g} mm    Voxel: {voxel_size:.4g} mm",
         f"Tag: {tag_size:.4g} mm ({marker_pixels}x{marker_pixels} cells, cell={cell_size:.4g} mm)    IDs: {tag_ids[0]}-{tag_ids[-1]}",
+        f"Margin: {margin_cells} cell ({margin_cells * cell_size:.4g} mm)    Border: {border_cells} cell ({border_cells * cell_size:.4g} mm)",
     ]
+    if attachment_record is not None:
+        info_lines.append(
+            "Attachment: +Z end-effector connector, "
+            f"rod {attachment_record['rod_length_mm']:.4g} mm x r{attachment_record['rod_radius_mm']:.4g} mm"
+        )
     render_voxel_thumbnail(marker_records, box_dims, thumb_path, info_lines)
     write_voxel_readme(config_data, out_dir)
     print("Done!")
@@ -2015,9 +2519,38 @@ def main():
     size_grp.add_argument("--tag-size", type=float, default=None, help="Tag size in mm (default: 30)")
     size_grp.add_argument("--cell-size", type=float, default=None, help="Cell size in mm (tag = cell × marker_pixels)")
     parser.add_argument("--margin-cell", type=int, default=None, help="Margin between tags in cells (default: 1)")
-    parser.add_argument("--border-cell", type=int, default=None, help="Outer border in cells (default: 1)")
+    parser.add_argument(
+        "--border-cell",
+        type=float,
+        default=None,
+        help="Outer border in 0.5-cell increments (default: 1)",
+    )
     parser.add_argument("--extruder", type=int, default=None, help="Bambu Studio extruder (default: 1)")
     parser.add_argument("--invert", action="store_true", default=None, help="Invert colors")
+    attach_grp = parser.add_argument_group("end-effector connector")
+    attach_grp.add_argument(
+        "--end-effector-connector",
+        action="store_true",
+        default=None,
+        help="Attach assets/end_effector_connector.stl to the +Z surface",
+    )
+    attach_grp.add_argument(
+        "--connector-rod-length",
+        type=float,
+        default=None,
+        help="Length in mm of the +Z rod between target surface and connector",
+    )
+    attach_grp.add_argument(
+        "--connector-rod-radius",
+        type=float,
+        default=None,
+        help="Connector rod radius in mm (default: 10)",
+    )
+    attach_grp.add_argument(
+        "--connector-stl",
+        default=None,
+        help="Connector STL path (default: assets/end_effector_connector.stl)",
+    )
 
     args = parser.parse_args()
 
@@ -2037,9 +2570,13 @@ def main():
 
         output = spec.output or "aruco_cube"
         margin_cells = spec.margin_cells if spec.margin_cells is not None else 1
-        border_cells = spec.border_cells if spec.border_cells is not None else 1
+        border_cells = _normalize_border_cells(
+            spec.border_cells if spec.border_cells is not None else 1
+        )
         extruder = spec.extruder if spec.extruder is not None else 1
         invert = bool(spec.invert) if spec.invert is not None else False
+        if spec.attachment is not None and spec.attachment.enabled:
+            _validate_attachment_config(spec.attachment, spec.source_path)
 
         if shape_type == "cuboid":
             grid_value = spec.grid or "1x1x1"
@@ -2138,9 +2675,17 @@ def main():
         grid = build_face_grid(
             face_patterns, fr, fc, dc, rc,
             config.marker_pixels, config.margin_cells, config.invert,
+            layout_scale=config.layout_scale,
         )
         face_grids[face_def[0]] = grid
-        builder.add_face(face_def, grid, config.box_dims, config.cell_size)
+        builder.add_face(
+            face_def, grid, config.box_dims,
+            config.cell_size / config.layout_scale,
+        )
+
+    attachment_record = add_end_effector_attachment(
+        builder, config.box_dims, spec.attachment, spec.source_path,
+    )
 
     # Validate mesh
     edges: dict[tuple[int, int], int] = {}
@@ -2179,13 +2724,18 @@ def main():
         "marker_pixels": config.marker_pixels,
         "box_dims": list(config.box_dims),
     }
+    if attachment_record is not None:
+        config_data["attachment"] = attachment_record
     config_path = os.path.join(out_dir, "config.json")
     with open(config_path, "w") as f:
         json.dump(config_data, f, indent=2)
     print(f"Wrote {config_path}")
 
     # Write MuJoCo assets (OBJ + atlas texture + MJCF XML)
-    write_mujoco_assets(config, face_grids, out_dir)
+    write_mujoco_assets(
+        config, face_grids, out_dir,
+        attachment=spec.attachment, source_path=spec.source_path,
+    )
 
     # Render thumbnail
     thumb_path = os.path.join(out_dir, "thumbnail.png")

@@ -429,9 +429,9 @@
   function compatibleDictionary(info) {
     const voxelSize = numberValue(els.voxelSize, 24);
     const tagSize = numberValue(els.tagSize, 18);
-    const border = integerValue(els.borderCells, 1);
+    const border = numberValue(els.borderCells, 1);
     const cellSize = tagSize / info.marker_pixels;
-    if (cellSize <= 0) {
+    if (cellSize <= 0 || border < 0 || Math.abs(border * 2 - Math.round(border * 2)) > 1e-6) {
       return false;
     }
     const faceCells = voxelSize / cellSize;
@@ -517,11 +517,11 @@
     const markerPixels = dictionary.marker_pixels;
     const voxelSize = numberValue(els.voxelSize, 24);
     const tagSize = numberValue(els.tagSize, 18);
-    const borderCells = integerValue(els.borderCells, 1);
+    const borderCells = numberValue(els.borderCells, 1);
     const cellSize = tagSize / markerPixels;
     const faceCells = Math.max(markerPixels + 2 * borderCells, Math.round(voxelSize / cellSize));
     const cellPx = tilePx / faceCells;
-    const offset = Math.floor((faceCells - markerPixels) / 2);
+    const offset = (faceCells - markerPixels) / 2;
     const invert = els.invert.checked;
 
     ctx.fillStyle = invert ? "#050505" : "#ffffff";
@@ -734,7 +734,7 @@
       `  tag_size_mm: ${numberValue(els.tagSize, 18)}`,
       "layout:",
       `  margin_cells: ${integerValue(els.marginCells, 1)}`,
-      `  border_cells: ${integerValue(els.borderCells, 1)}`,
+      `  border_cells: ${numberValue(els.borderCells, 1)}`,
       "material:",
       `  extruder: ${integerValue(els.extruder, 1)}`,
       `  invert: ${els.invert.checked ? "true" : "false"}`,

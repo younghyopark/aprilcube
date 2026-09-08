@@ -5,6 +5,7 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+.venv-release/
 
 # Generated output directories (cube.3mf, config.json, etc.)
 # models/
@@ -30,6 +31,15 @@ build/
 generate_models.sh
 
 models/*/stl
+
+# Locally generated T-target size variants
+/models/t_shape_target_s/
+/models/t_shape_target_m/
+/models/t_shape_target_l/
+/models/t_shape_target_xl/
+/models/t_shape_target_xlarge/
+/models/t_shape_target_xxlarge/
+/models/t_shape_target_xxlarge_dense/
 
 assets/extrinsic
 recording/

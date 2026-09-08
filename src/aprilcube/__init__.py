@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 import json
 from pathlib import Path
@@ -15,6 +15,7 @@ from aprilcube.detect import (
     CubePoseEstimator,
     KalmanFilterConfig,
     KalmanPoseFilter,
+    MarkerDetection,
     PoseSnapshot,
     load_cube_config,
     build_tag_corner_map,
@@ -26,6 +27,7 @@ __all__ = [
     "CubePoseEstimator",
     "KalmanFilterConfig",
     "KalmanPoseFilter",
+    "MarkerDetection",
     "PoseSnapshot",
     "load_cube_config",
     "build_tag_corner_map",

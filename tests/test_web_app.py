@@ -68,6 +68,16 @@ def test_client_javascript_syntax_is_valid():
     )
 
 
+def test_designer_preserves_half_cell_borders():
+    html = designer_path().read_text(encoding="utf-8")
+    javascript = designer_path().with_name("app.js").read_text(encoding="utf-8")
+
+    assert 'id="border-cells" type="number" min="0" step="0.5"' in html
+    assert "const border = numberValue(els.borderCells, 1);" in javascript
+    assert "const offset = (faceCells - markerPixels) / 2;" in javascript
+    assert "border_cells: ${numberValue(els.borderCells, 1)}" in javascript
+
+
 def _load_marker_data():
     marker_js = designer_path().with_name("marker-data.js").read_text(encoding="utf-8")
     match = re.search(r"window\.APRILCUBE_MARKERS = (.*);\s*$", marker_js)

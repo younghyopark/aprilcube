@@ -144,6 +144,7 @@ def build_face_textures(
         grid = build_face_grid(
             patterns[cur : cur + n], fr, fc, dc, rc,
             config.marker_pixels, config.margin_cells, config.invert,
+            layout_scale=config.layout_scale,
         )
         cur += n
         g = render_face_texture(grid, pixels_per_cell)

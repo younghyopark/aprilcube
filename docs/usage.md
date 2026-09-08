@@ -154,6 +154,10 @@ aprilcube generate examples/t_shape_target.yaml
 
 # Higher-ID-count voxel target
 aprilcube generate examples/chair_target.yaml
+
+# Add the included robot end-effector connector on the +Z face
+aprilcube generate --grid 1x1x1 --dict 4x4_50 --tag-size 30 \
+  --end-effector-connector --connector-rod-length 40
 ```
 
 ### Standalone Voxel Designer
@@ -192,6 +196,10 @@ layout:
 material:
   extruder: 1
   invert: false
+attachment:
+  type: end_effector_connector
+  rod_length_mm: 40
+  rod_radius_mm: 10
 ```
 
 A T-shaped target can be expressed as a union of axis-aligned voxel cuboids:
@@ -243,10 +251,19 @@ The repository includes several ready-to-generate voxel examples:
 | `--tag-size` | `30` | Tag size in mm |
 | `--cell-size` | - | Cell size in mm, alternative to `--tag-size` |
 | `--margin-cell` | `1` | Gap between adjacent tags, in cells |
-| `--border-cell` | `1` | Outer border per face edge, in cells |
+| `--border-cell` | `1` | Outer border per face edge, in 0.5-cell increments |
 | `-o, --output` | `aruco_cube` | Output directory |
 | `--extruder` | `1` | Bambu Studio extruder number |
 | `--invert` | - | Swap black and white |
+| `--end-effector-connector` | - | Attach `assets/end_effector_connector.stl` on the target +Z surface |
+| `--connector-rod-length` | - | Rod length in mm from the +Z surface to the connector |
+| `--connector-rod-radius` | `10` | Connector rod radius in mm |
+| `--connector-stl` | `assets/end_effector_connector.stl` | Alternate connector STL path |
+
+Half-cell borders keep markers centered by rendering each logical marker cell
+as a 2x2 surface raster. For example, `--border-cell 0.5` leaves half a
+logical cell at each outer edge while preserving the requested physical tag
+size and a full-cell gap between adjacent tags.
 
 ## Cuboid Grid Format
 

@@ -100,8 +100,8 @@ def build_tag_corner_map(config: CubeConfig) -> dict[int, np.ndarray]:
         # Centering offsets (same logic as build_face_grid in generate_cube.py)
         tag_block_w = face_cols * mp + max(0, face_cols - 1) * config.margin_cells
         tag_block_h = face_rows * mp + max(0, face_rows - 1) * config.margin_cells
-        row_off = (down_cells - tag_block_h) // 2
-        col_off = (right_cells - tag_block_w) // 2
+        row_off = (down_cells - tag_block_h) / 2.0
+        col_off = (right_cells - tag_block_w) / 2.0
 
         right_half = config.box_dims[right_ax] / 2.0
         down_half = config.box_dims[down_ax] / 2.0
@@ -510,6 +510,15 @@ class PoseSnapshot(NamedTuple):
     measurement_used: bool
     reproj_error: float
     n_tags: int
+
+
+class MarkerDetection(NamedTuple):
+    """One image-wide marker detection pass for a single ArUco dictionary."""
+    gray: np.ndarray
+    enhanced: np.ndarray
+    corners: object
+    ids: np.ndarray | None
+    rejected: object
 
 
 @dataclass
@@ -1108,17 +1117,58 @@ class CubePoseEstimator:
             self._fps_t = time.time()
         return result
 
-    def process_frame(self, image: np.ndarray,
-                      timestamp: float | None = None) -> dict:
+    def detect_markers(self, image: np.ndarray) -> MarkerDetection:
+        """Detect all markers for this estimator's dictionary in one image.
+
+        The returned detection pass can be reused with
+        ``process_marker_detections`` for multiple cube configurations that
+        share the same marker dictionary.
+        """
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if len(image.shape) == 3 else image
+        enhanced = _preprocess(gray)
+        try:
+            corners_list, ids, rejected = self.detector.detectMarkers(enhanced)
+        except cv2.error:
+            corners_list, ids, rejected = (), None, ()
+        return MarkerDetection(gray, enhanced, corners_list, ids, rejected)
+
+    def process_frame(
+        self,
+        image: np.ndarray,
+        timestamp: float | None = None,
+        store_latest: bool = True,
+    ) -> dict:
         """Process a single frame and return pose result.
 
         Args:
             image: BGR or grayscale frame.
             timestamp: Monotonic time in seconds for this frame.
                        If None, uses ``time.monotonic()``.
+            store_latest: Update async/viser latest-frame state and attach
+                ``debug_viz`` to the result. Disable when many estimators share
+                the same frame and only a custom combined overlay is needed.
         """
+        markers = self.detect_markers(image)
+        return self.process_marker_detections(
+            image,
+            markers,
+            timestamp=timestamp,
+            store_latest=store_latest,
+        )
+
+    def process_marker_detections(
+        self,
+        image: np.ndarray,
+        markers: MarkerDetection,
+        timestamp: float | None = None,
+        store_latest: bool = True,
+    ) -> dict:
+        """Estimate this cube's pose from a precomputed marker detection pass."""
         if timestamp is None:
             timestamp = time.monotonic()
+
+        def finish(res: dict) -> dict:
+            return self._store_latest(res, image) if store_latest else res
 
         result = {
             "success": False, "rvec": None, "tvec": None, "T": None,
@@ -1127,13 +1177,11 @@ class CubePoseEstimator:
             "visible_faces": set(), "predicted": False,
         }
 
-        # Detect
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if len(image.shape) == 3 else image
-        enhanced = _preprocess(gray)
-        try:
-            corners_list, ids, rejected = self.detector.detectMarkers(enhanced)
-        except cv2.error:
-            corners_list, ids, rejected = (), None, ()
+        gray = markers.gray
+        enhanced = markers.enhanced
+        corners_list = markers.corners
+        ids = markers.ids
+        rejected = markers.rejected
 
         # Collect valid detections from primary pass
         detections: list[tuple[int, np.ndarray]] = []
@@ -1212,7 +1260,7 @@ class CubePoseEstimator:
 
         if not obj_pts:
             self._prev_gray = gray.copy()  # still save for next frame's flow
-            return self._store_latest(self._try_predict(timestamp, result), image)
+            return finish(self._try_predict(timestamp, result))
 
         object_points = np.vstack(obj_pts).astype(np.float64)
         image_points = np.vstack(img_pts).astype(np.float64)
@@ -1287,7 +1335,7 @@ class CubePoseEstimator:
         if used_flow:
             max_reproj = 5.0
         if not success or reproj_err > max_reproj:
-            return self._store_latest(self._try_predict(timestamp, result), image)
+            return finish(self._try_predict(timestamp, result))
 
         # Reject flipped PnP solutions: verify that every detected face's
         # outward normal points toward the camera (negative z in camera frame).
@@ -1300,8 +1348,7 @@ class CubePoseEstimator:
                     normal_cam = R_est @ normal_obj
                     # Outward normal should face camera (z < 0 in camera frame)
                     if normal_cam[2] > 0:
-                        return self._store_latest(
-                            self._try_predict(timestamp, result), image)
+                        return finish(self._try_predict(timestamp, result))
                     break
 
         # Temporal consistency: reject sudden large jumps.
@@ -1320,13 +1367,11 @@ class CubePoseEstimator:
                 max_jump_mm = max(100.0, speed * dt * 3.0)
                 max_angle = max(np.radians(45), omega * dt * 3.0)
             if jump_mm > max_jump_mm or angle > max_angle:
-                return self._store_latest(
-                    self._try_predict(timestamp, result), image)
+                return finish(self._try_predict(timestamp, result))
         else:
             # Re-initialization after dropout — require reasonable reproj error
             if reproj_err > 2.5:
-                return self._store_latest(
-                    self._try_predict(timestamp, result), image)
+                return finish(self._try_predict(timestamp, result))
 
         # Kalman filter update
         n_inlier_count = len(inliers) if inliers is not None else 0
@@ -1361,7 +1406,7 @@ class CubePoseEstimator:
         result["T"] = T
         result["reproj_error"] = reproj_err
         result["n_inliers"] = n_inlier_count
-        return self._store_latest(result, image)
+        return finish(result)
 
     def draw_result(self, image: np.ndarray, result: dict) -> np.ndarray:
         """Draw detected markers, axes, and wireframe."""

@@ -1,6 +1,6 @@
 # aprilcube
 
-![](assets/printing_process.gif)
+![](https://raw.githubusercontent.com/younghyopark/aprilcube/main/assets/printing_process.gif)
 
 Generate 3D-printable fiducial targets with ArUco or AprilTag markers, then detect their 6-DOF pose from a camera. Targets can be simple cubes/cuboids or voxel-composed shapes such as T-shapes, chairs, frames, and stair-step objects.
 
@@ -9,11 +9,11 @@ Generate 3D-printable fiducial targets with ArUco or AprilTag markers, then dete
 1. **Generator** - creates a multi-color 3MF file with markers on the target surface, ready for dual-color 3D printing.
 2. **Detector** - detects the printed target in a camera image and estimates its full 6-DOF pose.
 
-![Voxel shape gallery](docs/voxel_shape_gallery.png)
+![Voxel shape gallery](https://raw.githubusercontent.com/younghyopark/aprilcube/main/docs/voxel_shape_gallery.png)
 
 ## Technical Report
 
-Read the technical report: [AprilCube: 3D-Printable Fiducial Targets for Reliable 6-DoF Pose Estimation](docs/paper.pdf).
+Read the technical report: [AprilCube: 3D-Printable Fiducial Targets for Reliable 6-DoF Pose Estimation](https://github.com/younghyopark/aprilcube/blob/main/docs/paper.pdf).
 
 If you use AprilCube in research, please cite:
 
@@ -34,7 +34,7 @@ If you use AprilCube in research, please cite:
 pip install aprilcube
 ```
 
-Requires Python 3.10+ and installs `opencv-contrib-python`, `numpy`, and `pyyaml`.
+Requires Python 3.10+ and installs OpenCV 4.x (`opencv-contrib-python`), `numpy`, and `pyyaml`.
 
 ## Basic Usage
 
@@ -50,6 +50,17 @@ Generate a voxel-composed target from a YAML spec:
 
 ```bash
 aprilcube generate examples/t_shape_target.yaml
+```
+
+### Robot end-effector mount
+
+Add the included connector and mounting rod to attach an AprilCube to a robot
+end effector, such as those on Franka and Flexiv arms:
+
+```bash
+aprilcube generate --tag-size 24 --grid 1x3x3 --dict 4x4_1000 \
+  --end-effector-connector --connector-rod-length 50 \
+  --connector-rod-radius 10
 ```
 
 Open the standalone voxel designer and export a YAML spec:
@@ -79,7 +90,7 @@ if result["success"]:
     print(result["reproj_error"])   # Reprojection error in pixels
 ```
 
-For detailed CLI options, YAML schemas, Python API notes, visualization, async detection, output formats, and detector internals, see [docs/usage.md](docs/usage.md).
+For detailed CLI options, YAML schemas, Python API notes, visualization, async detection, output formats, and detector internals, see [docs/usage.md](https://github.com/younghyopark/aprilcube/blob/main/docs/usage.md).
 
 ## Printing
 
@@ -93,9 +104,10 @@ The latest generated 3MF files include Bambu Studio 2.x project metadata for com
 
 ## Resources
 
-- [Detailed usage guide](docs/usage.md)
-- [Technical report](docs/paper.pdf)
-- [Voxel example gallery](docs/voxel_shape_gallery.png)
+- [Detailed usage guide](https://github.com/younghyopark/aprilcube/blob/main/docs/usage.md)
+- [Technical report](https://github.com/younghyopark/aprilcube/blob/main/docs/paper.pdf)
+- [Voxel example gallery](https://github.com/younghyopark/aprilcube/blob/main/docs/voxel_shape_gallery.png)
+- [Changelog](https://github.com/younghyopark/aprilcube/blob/main/CHANGELOG.md)
 
 ## License
 
