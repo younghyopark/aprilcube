@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.1 - 2026-10-03
+
+- Add a printable robot calibration cube in `models/calibration_cube`: the
+  README's end-effector mount example (1x3x3, `4x4_1000`, 24 mm tags, a 50 mm
+  by 10 mm rod to the connector). aiofranka's `aiofranka camera calibrate`
+  holds it on a Franka's flange to locate a fixed camera, and the README
+  links its 3MF.
+
 ## 0.3.0 - 2026-09-08
 
 - Add an optional robot end-effector connector and configurable mounting rod
