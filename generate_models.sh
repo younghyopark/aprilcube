@@ -42,4 +42,16 @@ for entry in "${MODELS[@]}"; do
     echo ""
 done
 
+# The robot calibration cube: 1x3x3, with the end-effector connector on +Z (see the README).
+echo "=== calibration_cube ==="
+aprilcube generate \
+    --grid 1x3x3 \
+    --dict 4x4_1000 \
+    --tag-size 24 \
+    --end-effector-connector \
+    --connector-rod-length 50 \
+    --connector-rod-radius 10 \
+    -o "$MODELS_DIR/calibration_cube"
+echo ""
+
 echo "All models generated in $MODELS_DIR/"

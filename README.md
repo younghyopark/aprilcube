@@ -63,6 +63,11 @@ aprilcube generate --tag-size 24 --grid 1x3x3 --dict 4x4_1000 \
   --connector-rod-radius 10
 ```
 
+This cube is ready to print in [models/calibration_cube](models/calibration_cube)
+([cube.3mf](models/calibration_cube/cube.3mf)). [aiofranka](https://github.com/younghyopark/aiofranka)'s
+`aiofranka camera calibrate` holds it on a Franka's flange to locate a fixed camera
+relative to the robot.
+
 Open the standalone voxel designer and export a YAML spec:
 
 ```bash
