@@ -114,6 +114,48 @@ The latest generated 3MF files include Bambu Studio 2.x project metadata for com
 - [Voxel example gallery](https://github.com/younghyopark/aprilcube/blob/main/docs/voxel_shape_gallery.png)
 - [Changelog](https://github.com/younghyopark/aprilcube/blob/main/CHANGELOG.md)
 
+## Community Use Cases
+
+<table>
+  <tr>
+    <td width="33%" valign="top">
+      <a href="https://arxiv.org/abs/2610.07681"><img src="https://raw.githubusercontent.com/younghyopark/aprilcube/main/docs/community/eigendexplore.jpg" width="250" alt="Allegro hand holding an aprilcube under an RGB-D camera"></a><br>
+      <b><a href="https://arxiv.org/abs/2610.07681">EigenDEXplore</a></b> (2026)<br>
+      <sub>Tracks the cube during real-world in-hand reorientation on an Allegro hand.</sub>
+    </td>
+    <td width="33%" valign="top">
+      <a href="https://arxiv.org/abs/2610.28628"><img src="https://raw.githubusercontent.com/younghyopark/aprilcube/main/docs/community/hybrid-dexterous-mimicking.jpg" width="250" alt="Robot arm and dexterous hand holding an aprilcube"></a><br>
+      <b><a href="https://arxiv.org/abs/2610.28628">Hybrid Dexterous Mimicking</a></b> (2026)<br>
+      <sub>Real-to-sim AprilCube motions for in-hand reorientation on a real robot hand.</sub>
+    </td>
+    <td width="33%" valign="top">
+      <a href="https://arxiv.org/abs/2607.03570"><img src="https://raw.githubusercontent.com/younghyopark/aprilcube/main/docs/community/unified-hand-action-space.jpg" width="250" alt="LEAP hand holding an AprilTag cube between two RealSense cameras"></a><br>
+      <b><a href="https://arxiv.org/abs/2607.03570">Unified Hand Action Space</a></b> (2026)<br>
+      <sub>Tracks the cube for in-hand reorientation on a real LEAP Hand.</sub>
+    </td>
+  </tr>
+  <tr>
+    <td width="33%" valign="top">
+      <a href="https://nus-lins-lab.github.io/CIMIWeb/"><img src="https://raw.githubusercontent.com/younghyopark/aprilcube/main/docs/community/cimi.jpg" width="250" alt="Gloved hand with an aprilcube on its back and fingertip cameras"></a><br>
+      <b><a href="https://nus-lins-lab.github.io/CIMIWeb/">CIMI</a></b> (NUS)<br>
+      <sub>AprilCubes on the back of the hand and the fingertips give wrist and finger poses in human demos.</sub>
+    </td>
+    <td width="33%" valign="top">
+      <a href="https://github.com/muayad-chalabi/aprilfold"><img src="https://raw.githubusercontent.com/younghyopark/aprilcube/main/docs/community/aprilfold.jpg" width="250" alt="Exploded view of a foldable AprilFold cube"></a><br>
+      <b><a href="https://github.com/muayad-chalabi/aprilfold">AprilFold</a></b><br>
+      <sub>Foldable single-color cubes and printed robot twins, built on aprilcube.</sub>
+    </td>
+    <td width="33%" valign="middle" align="center">
+      <b>Using aprilcube?</b><br>
+      <sub>Open a pull request to add your project here.</sub>
+    </td>
+  </tr>
+</table>
+
+Also used in [RobotCamCalib](https://github.com/ariszxxu/RobotCamCalib) to calibrate cameras on a robot hand.
+
+Images are from each project's paper, website, or repository, and belong to their authors. If you're an author and want your image changed or removed, please [open an issue](https://github.com/younghyopark/aprilcube/issues).
+
 ## License
 
 MIT
